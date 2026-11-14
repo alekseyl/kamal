@@ -3,10 +3,11 @@ class Kamal::Configuration::Ssh
 
   include Kamal::Configuration::Validation
 
-  attr_reader :ssh_config
+  attr_reader :ssh_config, :secrets
 
   def initialize(config:)
     @ssh_config = config.raw_config.ssh || {}
+    @secrets = config.secrets
     validate! ssh_config
   end
 
@@ -35,11 +36,29 @@ class Kamal::Configuration::Ssh
   end
 
   def key_data
-    ssh_config["key_data"]
+    key_data = ssh_config["key_data"]
+    return unless key_data
+
+    key_data.map do |k|
+      if secrets.key?(k)
+        secrets[k]
+      else
+        warn "Inline key_data usage is deprecated and will be removed in Kamal 3. Please store your key_data in a secret."
+        k
+      end
+    end
+  end
+
+  def config
+    ssh_config["config"]
+  end
+
+  def forward_agent
+    ssh_config["forward_agent"]
   end
 
   def options
-    { user: user, port: port, proxy: proxy, logger: logger, keepalive: true, keepalive_interval: 30, keys_only: keys_only, keys: keys, key_data: key_data }.compact
+    { user: user, port: port, proxy: proxy, logger: logger, keepalive: true, keepalive_interval: 30, keys_only: keys_only, keys: keys, key_data: key_data, config: config, forward_agent: forward_agent }.compact
   end
 
   def to_h

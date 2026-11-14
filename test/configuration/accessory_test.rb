@@ -16,7 +16,7 @@ class ConfigurationAccessoryTest < ActiveSupport::TestCase
         "mysql" => {
           "image" => "public.registry/mysql:8.0",
           "host" => "1.1.1.5",
-          "port" => "3306",
+          "port" => "127.0.0.1:3306:3306",
           "env" => {
             "clear" => {
               "MYSQL_ROOT_HOST" => "%"
@@ -36,7 +36,7 @@ class ConfigurationAccessoryTest < ActiveSupport::TestCase
         "redis" => {
           "image" => "redis:latest",
           "hosts" => [ "1.1.1.6", "1.1.1.7" ],
-          "port" => "6379:6379",
+          "port" => "127.0.0.1:6379:6379",
           "labels" => {
             "cache" => "true"
           },
@@ -56,7 +56,7 @@ class ConfigurationAccessoryTest < ActiveSupport::TestCase
           "image" => "monitoring:latest",
           "registry" => { "server" => "other.registry", "username" => "user", "password" => "pw" },
           "role" => "web",
-          "port" => "4321:4321",
+          "port" => "127.0.0.1:4321:4321",
           "labels" => {
             "cache" => "true"
           },
@@ -107,8 +107,77 @@ class ConfigurationAccessoryTest < ActiveSupport::TestCase
   end
 
   test "port" do
-    assert_equal "3306:3306", @config.accessory(:mysql).port
-    assert_equal "6379:6379", @config.accessory(:redis).port
+    assert_equal "127.0.0.1:3306:3306", @config.accessory(:mysql).port
+    assert_equal "127.0.0.1:6379:6379", @config.accessory(:redis).port
+  end
+
+  test "port with no port config" do
+    @deploy[:accessories]["mysql"].delete("port")
+    assert_nil Kamal::Configuration.new(@deploy).accessory(:mysql).port
+  end
+
+  test "explicit bind addresses are preserved verbatim" do
+    {
+      "127.0.0.1:3306:3306" => "127.0.0.1:3306:3306",
+      "0.0.0.0:3306:3306" => "0.0.0.0:3306:3306",
+      "192.168.1.1:3306:3306" => "192.168.1.1:3306:3306",
+      "[::1]:3306:3306" => "[::1]:3306:3306",
+      "[::]::3306" => "[::]::3306",
+      "192.168.1.1:3306:3306/tcp" => "192.168.1.1:3306:3306/tcp",
+      "127.0.0.1:3306:3306/udp" => "127.0.0.1:3306:3306/udp"
+    }.each do |port_config, expected|
+      @deploy[:accessories]["mysql"]["port"] = port_config
+      assert_equal expected, Kamal::Configuration.new(@deploy).accessory(:mysql).port, port_config
+    end
+  end
+
+  test "publishing through options requires a bind address too" do
+    @deploy[:accessories]["mysql"].delete("port")
+    @deploy[:accessories]["mysql"]["options"] = { "publish" => "3306:3306" }
+
+    error = assert_raises(Kamal::ConfigurationError) { Kamal::Configuration.new(@deploy).accessory(:mysql) }
+    assert_match /options\/publish "3306:3306" must name a bind address/, error.message
+  end
+
+  test "a bound publish in options is accepted" do
+    @deploy[:accessories]["mysql"].delete("port")
+    @deploy[:accessories]["mysql"]["options"] = { "publish" => [ "127.0.0.1:3306:3306" ] }
+
+    assert_equal [ "--publish", "\"127.0.0.1:3306:3306\"" ], Kamal::Configuration.new(@deploy).accessory(:mysql).option_args
+  end
+
+  test "a blank port publishes nothing" do
+    @deploy[:accessories]["mysql"]["port"] = ""
+
+    assert_nil Kamal::Configuration.new(@deploy).accessory(:mysql).publish_args
+  end
+
+  test "port without an explicit bind address raises an error" do
+    [
+      "3306",
+      "3306:3306",
+      "3306:3306/udp",
+      "127.0.0.1:3306"
+    ].each do |port_config|
+      @deploy[:accessories]["mysql"]["port"] = port_config
+      error = assert_raises(Kamal::ConfigurationError, port_config) do
+        Kamal::Configuration.new(@deploy).accessory(:mysql).port
+      end
+      assert_match "must name a bind address", error.message
+    end
+  end
+
+  test "port with an invalid bind address raises an error" do
+    [
+      "999.999.999.999:3306:3306",
+      "[not::valid::ip]:3306:3306",
+      "[::1:3306:3306"
+    ].each do |port_config|
+      @deploy[:accessories]["mysql"]["port"] = port_config
+      assert_raises(Kamal::ConfigurationError, port_config) do
+        Kamal::Configuration.new(@deploy).accessory(:mysql).port
+      end
+    end
   end
 
   test "host" do
@@ -162,26 +231,205 @@ class ConfigurationAccessoryTest < ActiveSupport::TestCase
     assert_equal [ "--volume", "/var/lib/redis:/data" ], @config.accessory(:redis).volume_args
   end
 
-  test "dynamic file expansion" do
-    @deploy[:accessories]["mysql"]["files"] << "test/fixtures/files/structure.sql.erb:/docker-entrypoint-initdb.d/structure.sql"
-    @config = Kamal::Configuration.new(@deploy)
+  test "volume args with docker named volume" do
+    @deploy[:accessories]["redis"]["volumes"] = [ "redis_data:/data" ]
+    config = Kamal::Configuration.new(@deploy)
+    assert_equal [ "--volume", "redis_data:/data" ], config.accessory(:redis).volume_args
+  end
 
-    assert_match "This was dynamically expanded", @config.accessory(:mysql).files.keys[2].read
-    assert_match "%", @config.accessory(:mysql).files.keys[2].read
+  test "dynamic file expansion" do
+    @deploy[:accessories]["mysql"]["env"]["secret"] << "ENV_VAR:SECRET_VAR"
+    @deploy[:accessories]["mysql"]["files"] << "test/fixtures/files/structure.sql.erb:/docker-entrypoint-initdb.d/structure.sql"
+
+    with_test_secrets("secrets" => "MYSQL_ROOT_PASSWORD=secret123\nSECRET_VAR=secret_env_value") do
+      @config = Kamal::Configuration.new(@deploy)
+
+      assert_match "This was dynamically expanded", @config.accessory(:mysql).files.keys[2].read
+      assert_match "%", @config.accessory(:mysql).files.keys[2].read
+      assert_match "secret123", @config.accessory(:mysql).files.keys[2].read
+      assert_match "secret_env_value", @config.accessory(:mysql).files.keys[2].read
+    end
+  end
+
+  test "parallel erb file renders keep accessory env interpolations" do
+    @deploy[:accessories]["mysql"]["files"] = [
+      "test/fixtures/files/structure.sql.erb:/docker-entrypoint-initdb.d/structure.sql"
+    ]
+    @deploy[:accessories]["mysql"]["env"]["secret"] << "ENV_VAR:SECRET_VAR"
+
+    with_test_secrets("secrets" => "MYSQL_ROOT_PASSWORD=secret123\nSECRET_VAR=secret_env_value") do
+      accessory = Kamal::Configuration.new(@deploy).accessory(:mysql)
+      original_result = ERB.instance_method(:result)
+      entered, release, finished = Queue.new, Queue.new, Queue.new
+      renders = {}
+
+      begin
+        ERB.define_method(:result) do |*args, **kwargs|
+          entered.push(true)
+          release.pop
+          original_result.bind_call(self, *args, **kwargs)
+        end
+
+        threads = [ :host_a, :host_b ].map do |host|
+          Thread.new do
+            renders[host] = accessory.files.keys.first.read
+          ensure
+            finished.push(host)
+          end
+        end
+
+        2.times { entered.pop }
+        release.push(true)
+        finished.pop
+        release.push(true)
+        threads.each(&:value)
+
+        renders.each do |host, contents|
+          assert_match "secret123", contents, "#{host} lost MYSQL_ROOT_PASSWORD"
+          assert_match "secret_env_value", contents, "#{host} lost ENV_VAR"
+          assert_match "%", contents, "#{host} lost MYSQL_ROOT_HOST"
+        end
+      ensure
+        ERB.define_method(:result, original_result)
+      end
+    end
   end
 
   test "directory with a relative path" do
     @deploy[:accessories]["mysql"]["directories"] = [ "data:/var/lib/mysql" ]
-    assert_equal({ "$PWD/app-mysql/data"=>"/var/lib/mysql" }, @config.accessory(:mysql).directories)
+    assert_equal({ "$PWD/app-mysql/data" => { host_path: "app-mysql/data", container_path: "/var/lib/mysql", options: nil, mode: nil, owner: nil } }, @config.accessory(:mysql).directories)
   end
 
   test "directory with an absolute path" do
     @deploy[:accessories]["mysql"]["directories"] = [ "/var/data/mysql:/var/lib/mysql" ]
-    assert_equal({ "/var/data/mysql"=>"/var/lib/mysql" }, @config.accessory(:mysql).directories)
+    assert_equal({ "/var/data/mysql" => { host_path: "/var/data/mysql", container_path: "/var/lib/mysql", options: nil, mode: nil, owner: nil } }, @config.accessory(:mysql).directories)
+  end
+
+  test "directory with mount options" do
+    @deploy[:accessories]["mysql"]["files"] = []
+    @deploy[:accessories]["mysql"]["directories"] = [ "data:/var/lib/mysql:z" ]
+    config = Kamal::Configuration.new(@deploy)
+    assert_equal({ "$PWD/app-mysql/data" => { host_path: "app-mysql/data", container_path: "/var/lib/mysql", options: "z", mode: nil, owner: nil } }, config.accessory(:mysql).directories)
+    assert_equal [ "--volume", "$PWD/app-mysql/data:/var/lib/mysql:z" ], config.accessory(:mysql).volume_args
+  end
+
+  test "file with mount options" do
+    @deploy[:accessories]["mysql"]["files"] = [ "config/mysql/my.cnf:/etc/mysql/my.cnf:ro,z" ]
+    @deploy[:accessories]["mysql"]["directories"] = []
+    config = Kamal::Configuration.new(@deploy)
+    files = config.accessory(:mysql).files
+    assert_equal "ro,z", files.values.first[:options]
+    assert_equal [ "--volume", "$PWD/app-mysql/etc/mysql/my.cnf:/etc/mysql/my.cnf:ro,z" ], config.accessory(:mysql).volume_args
+  end
+
+  test "file with string format has default mode" do
+    @deploy[:accessories]["mysql"]["files"] = [ "config/mysql/my.cnf:/etc/mysql/my.cnf" ]
+    @deploy[:accessories]["mysql"]["directories"] = []
+    config = Kamal::Configuration.new(@deploy)
+    files = config.accessory(:mysql).files
+    assert_equal "755", files.values.first[:mode]
+    assert_nil files.values.first[:owner]
+  end
+
+  test "file with hash format and custom mode" do
+    @deploy[:accessories]["mysql"]["files"] = [
+      { "local" => "config/mysql/my.cnf", "remote" => "/etc/mysql/my.cnf", "mode" => "0600" }
+    ]
+    @deploy[:accessories]["mysql"]["directories"] = []
+    config = Kamal::Configuration.new(@deploy)
+    files = config.accessory(:mysql).files
+    assert_equal "0600", files.values.first[:mode]
+    assert_nil files.values.first[:owner]
+  end
+
+  test "file with hash format and custom owner" do
+    @deploy[:accessories]["mysql"]["files"] = [
+      { "local" => "config/mysql/my.cnf", "remote" => "/etc/mysql/my.cnf", "owner" => "mysql:mysql" }
+    ]
+    @deploy[:accessories]["mysql"]["directories"] = []
+    config = Kamal::Configuration.new(@deploy)
+    files = config.accessory(:mysql).files
+    assert_equal "755", files.values.first[:mode]
+    assert_equal "mysql:mysql", files.values.first[:owner]
+  end
+
+  test "file with hash format and all options" do
+    @deploy[:accessories]["mysql"]["files"] = [
+      { "local" => "config/mysql/my.cnf", "remote" => "/etc/mysql/my.cnf", "mode" => "0640", "owner" => "1000:1000", "options" => "Z" }
+    ]
+    @deploy[:accessories]["mysql"]["directories"] = []
+    config = Kamal::Configuration.new(@deploy)
+    files = config.accessory(:mysql).files
+    file_config = files.values.first
+    assert_equal "0640", file_config[:mode]
+    assert_equal "1000:1000", file_config[:owner]
+    assert_equal "Z", file_config[:options]
+    assert_equal [ "--volume", "$PWD/app-mysql/etc/mysql/my.cnf:/etc/mysql/my.cnf:Z" ], config.accessory(:mysql).volume_args
+  end
+
+  test "file with hash format erb expansion" do
+    @deploy[:accessories]["mysql"]["files"] = [
+      { "local" => "test/fixtures/files/structure.sql.erb", "remote" => "/docker-entrypoint-initdb.d/structure.sql" }
+    ]
+    @deploy[:accessories]["mysql"]["directories"] = []
+
+    with_test_secrets("secrets" => "MYSQL_ROOT_PASSWORD=secret123") do
+      config = Kamal::Configuration.new(@deploy)
+      files = config.accessory(:mysql).files
+      assert_match "This was dynamically expanded", files.keys.first.read
+    end
+  end
+
+  test "directory with hash format and custom mode" do
+    @deploy[:accessories]["mysql"]["files"] = []
+    @deploy[:accessories]["mysql"]["directories"] = [
+      { "local" => "data", "remote" => "/var/lib/mysql", "mode" => "0750" }
+    ]
+    config = Kamal::Configuration.new(@deploy)
+    directories = config.accessory(:mysql).directories
+    assert_equal "0750", directories.values.first[:mode]
+    assert_nil directories.values.first[:owner]
+  end
+
+  test "directory with hash format and custom owner" do
+    @deploy[:accessories]["mysql"]["files"] = []
+    @deploy[:accessories]["mysql"]["directories"] = [
+      { "local" => "data", "remote" => "/var/lib/mysql", "owner" => "mysql:mysql" }
+    ]
+    config = Kamal::Configuration.new(@deploy)
+    directories = config.accessory(:mysql).directories
+    assert_nil directories.values.first[:mode]
+    assert_equal "mysql:mysql", directories.values.first[:owner]
+  end
+
+  test "directory with hash format and all options" do
+    @deploy[:accessories]["mysql"]["files"] = []
+    @deploy[:accessories]["mysql"]["directories"] = [
+      { "local" => "data", "remote" => "/var/lib/mysql", "mode" => "0750", "owner" => "1000:1000", "options" => "z" }
+    ]
+    config = Kamal::Configuration.new(@deploy)
+    directories = config.accessory(:mysql).directories
+    dir_config = directories.values.first
+    assert_equal "0750", dir_config[:mode]
+    assert_equal "1000:1000", dir_config[:owner]
+    assert_equal "z", dir_config[:options]
+    assert_equal [ "--volume", "$PWD/app-mysql/data:/var/lib/mysql:z" ], config.accessory(:mysql).volume_args
   end
 
   test "options" do
     assert_equal [ "--cpus", "\"4\"", "--memory", "\"2GB\"" ], @config.accessory(:redis).option_args
+  end
+
+  test "restart policy" do
+    @deploy[:accessories]["redis"]["options"]["restart"] = "always"
+    config = Kamal::Configuration.new(@deploy)
+
+    assert_equal "always", config.accessory(:redis).restart_policy
+    assert_equal [ "--cpus", "\"4\"", "--memory", "\"2GB\"" ], config.accessory(:redis).option_args
+  end
+
+  test "default restart policy" do
+    assert_equal "unless-stopped", @config.accessory(:redis).restart_policy
   end
 
   test "network_args default" do
@@ -198,11 +446,13 @@ class ConfigurationAccessoryTest < ActiveSupport::TestCase
     assert_equal [ "monitoring.example.com" ], @config.accessory(:monitoring).proxy.hosts
   end
 
-  test "can't set restart in options" do
-    @deploy[:accessories]["mysql"]["options"] = { "restart" => "always" }
+  test "invalid boolean restart policy" do
+    @deploy[:accessories]["mysql"]["options"] = { "restart" => false }
 
-    assert_raises Kamal::ConfigurationError, "servers/workers: Cannot set restart policy in docker options, unless-stopped is required" do
+    error = assert_raises Kamal::ConfigurationError do
       Kamal::Configuration.new(@deploy)
     end
+
+    assert_equal %(accessories/mysql/options/restart: should be a string. Use "no" to disable restarts), error.message
   end
 end

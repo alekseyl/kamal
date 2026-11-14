@@ -1,7 +1,7 @@
 module Kamal::Cli::Healthcheck::Poller
   extend self
 
-  def wait_for_healthy(role, &block)
+  def wait_for_healthy(&block)
     attempt = 1
     timeout_at = Time.now + KAMAL.config.deploy_timeout
     readiness_delay = KAMAL.config.readiness_delay
@@ -12,7 +12,7 @@ module Kamal::Cli::Healthcheck::Poller
       if status == "running"
         # Wait for the readiness delay and confirm it is still running
         if readiness_delay > 0
-          info "Container is running, waiting for readiness delay of #{readiness_delay} seconds"
+          info "Container is running, waiting for readiness with a delay of #{readiness_delay} seconds"
           sleep readiness_delay
           status = block.call
         end

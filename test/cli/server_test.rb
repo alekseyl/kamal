@@ -3,7 +3,7 @@ require_relative "cli_test_case"
 class CliServerTest < CliTestCase
   test "running a command with exec" do
     SSHKit::Backend::Abstract.any_instance.stubs(:capture)
-      .with("date", verbosity: 1)
+      .with("date", strip: true, verbosity: 1)
       .returns("Today")
 
     hosts = "1.1.1.1".."1.1.1.4"
@@ -17,7 +17,7 @@ class CliServerTest < CliTestCase
 
   test "running a command with exec multiple arguments" do
     SSHKit::Backend::Abstract.any_instance.stubs(:capture)
-      .with("date -j", verbosity: 1)
+      .with("date -j", strip: true, verbosity: 1)
       .returns("Today")
 
     hosts = "1.1.1.1".."1.1.1.4"
@@ -27,6 +27,22 @@ class CliServerTest < CliTestCase
         assert_match "App Host: #{host}\nToday", output
       end
     end
+  end
+
+  test "running a command with exec --raw writes stdout verbatim" do
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture)
+      .with("date", strip: false, verbosity: 1)
+      .returns("Today")
+
+    run_command("exec", "date", "--raw").tap do |output|
+      assert_equal "Today" * 4, output
+      assert_no_match(/App Host:/, output)
+      assert_no_match(/Running 'date'/, output)
+    end
+  end
+
+  test "exec --raw is incompatible with --interactive" do
+    assert_raises(ArgumentError) { run_command("exec", "date", "--raw", "--interactive") }
   end
 
   test "bootstrap already installed" do
@@ -40,7 +56,7 @@ class CliServerTest < CliTestCase
   test "bootstrap install as non-root user" do
     stub_setup
     SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:docker, "-v", raise_on_non_zero_exit: false).returns(false).at_least_once
-    SSHKit::Backend::Abstract.any_instance.expects(:execute).with('[ "${EUID:-$(id -u)}" -eq 0 ] || command -v sudo >/dev/null || command -v su >/dev/null', raise_on_non_zero_exit: false).returns(false).at_least_once
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with('[ "${EUID:-$(id -u)}" -eq 0 ] || sudo -nl usermod >/dev/null', raise_on_non_zero_exit: false).returns(false).at_least_once
     SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:mkdir, "-p", ".kamal").returns("").at_least_once
 
     assert_raise RuntimeError, "Docker is not installed on 1.1.1.1, 1.1.1.3, 1.1.1.4, 1.1.1.2 and can't be automatically installed without having root access and the `curl` command available. Install Docker manually: https://docs.docker.com/engine/install/" do
@@ -51,8 +67,9 @@ class CliServerTest < CliTestCase
   test "bootstrap install as root user" do
     stub_setup
     SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:docker, "-v", raise_on_non_zero_exit: false).returns(false).at_least_once
-    SSHKit::Backend::Abstract.any_instance.expects(:execute).with('[ "${EUID:-$(id -u)}" -eq 0 ] || command -v sudo >/dev/null || command -v su >/dev/null', raise_on_non_zero_exit: false).returns(true).at_least_once
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with('[ "${EUID:-$(id -u)}" -eq 0 ] || sudo -nl usermod >/dev/null', raise_on_non_zero_exit: false).returns(true).at_least_once
     SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:sh, "-c", "'curl -fsSL https://get.docker.com || wget -O - https://get.docker.com || echo \"exit 1\"'", "|", :sh).at_least_once
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with('[ "${EUID:-$(id -u)}" -eq 0 ]', raise_on_non_zero_exit: false).returns(true).at_least_once
     SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:mkdir, "-p", ".kamal").returns("").at_least_once
     Kamal::Commands::Hook.any_instance.stubs(:hook_exists?).returns(true)
     SSHKit::Backend::Abstract.any_instance.expects(:execute).with(".kamal/hooks/pre-connect", anything).at_least_once
@@ -61,7 +78,28 @@ class CliServerTest < CliTestCase
     run_command("bootstrap").tap do |output|
       ("1.1.1.1".."1.1.1.4").map do |host|
         assert_match "Missing Docker on #{host}. Installing…", output
-        assert_match "Running the docker-setup hook", output
+      end
+    end
+  end
+
+  test "bootstrap install as sudo non-root user" do
+    stub_setup
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:docker, "-v", raise_on_non_zero_exit: false).returns(false).at_least_once
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with('[ "${EUID:-$(id -u)}" -eq 0 ] || sudo -nl usermod >/dev/null', raise_on_non_zero_exit: false).returns(true).at_least_once
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:sh, "-c", "'curl -fsSL https://get.docker.com || wget -O - https://get.docker.com || echo \"exit 1\"'", "|", :sh).at_least_once
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with('[ "${EUID:-$(id -u)}" -eq 0 ]', raise_on_non_zero_exit: false).returns(false).at_least_once
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with('id -nG "${USER:-$(id -un)}" | grep -qw docker', raise_on_non_zero_exit: false).returns(false).at_least_once
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with('sudo -n usermod -aG docker "${USER:-$(id -un)}"').at_least_once
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with("kill -HUP $PPID").at_least_once.raises(IOError, "closed stream")
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:mkdir, "-p", ".kamal").returns("").at_least_once
+    Kamal::Commands::Hook.any_instance.stubs(:hook_exists?).returns(true)
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with(".kamal/hooks/pre-connect", anything).at_least_once
+    SSHKit::Backend::Abstract.any_instance.expects(:execute).with(".kamal/hooks/docker-setup", anything).at_least_once
+
+    run_command("bootstrap").tap do |output|
+      ("1.1.1.1".."1.1.1.4").map do |host|
+        assert_match "Missing Docker on #{host}. Installing…", output
+        assert_match "Session refreshed due to group change.", output
       end
     end
   end

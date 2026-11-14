@@ -1,3 +1,5 @@
+require "ipaddr"
+
 class Kamal::Configuration::Accessory
   include Kamal::Configuration::Validation
 
@@ -17,6 +19,7 @@ class Kamal::Configuration::Accessory
       with: Kamal::Configuration::Validator::Accessory
 
     ensure_valid_roles
+    ensure_valid_port
 
     @env = initialize_env
     @proxy = initialize_proxy if running_proxy?
@@ -36,9 +39,7 @@ class Kamal::Configuration::Accessory
   end
 
   def port
-    if port = accessory_config["port"]&.to_s
-      port.include?(":") ? port : "#{port}:#{port}"
-    end
+    accessory_config["port"]&.to_s.presence
   end
 
   def network_args
@@ -74,33 +75,39 @@ class Kamal::Configuration::Accessory
   end
 
   def files
-    accessory_config["files"]&.to_h do |local_to_remote_mapping|
-      local_file, remote_file = local_to_remote_mapping.split(":")
-      [ expand_local_file(local_file), expand_remote_file(remote_file) ]
+    accessory_config["files"]&.to_h do |config|
+      parse_path_config(config, default_mode: "755") do |local, remote|
+        {
+          key: expand_local_file(local),
+          host_path: expand_remote_file(remote),
+          container_path: remote
+        }
+      end
     end || {}
   end
 
   def directories
-    accessory_config["directories"]&.to_h do |host_to_container_mapping|
-      host_path, container_path = host_to_container_mapping.split(":")
-      [ expand_host_path(host_path), container_path ]
+    accessory_config["directories"]&.to_h do |config|
+      parse_path_config(config, default_mode: nil) do |local, remote|
+        {
+          key: expand_host_path(local),
+          host_path: expand_host_path_for_volume(local),
+          container_path: remote
+        }
+      end
     end || {}
   end
 
-  def volumes
-    specific_volumes + remote_files_as_volumes + remote_directories_as_volumes
-  end
-
   def volume_args
-    argumentize "--volume", volumes
+    argumentize("--volume", specific_volumes) + (path_volumes(files) + path_volumes(directories)).flat_map(&:docker_args)
   end
 
   def option_args
-    if args = accessory_config["options"]
-      optionize args
-    else
-      []
-    end
+    optionize docker_options.reject { |key, _| key.to_s == "restart" }
+  end
+
+  def restart_policy
+    restart_policy_option || "unless-stopped"
   end
 
   def cmd
@@ -142,21 +149,27 @@ class Kamal::Configuration::Accessory
 
     def expand_local_file(local_file)
       if local_file.end_with?("erb")
-        with_clear_env_loaded { read_dynamic_file(local_file) }
+        read_dynamic_file(local_file)
       else
         Pathname.new(File.expand_path(local_file)).to_s
       end
     end
 
-    def with_clear_env_loaded
-      env.clear.each { |k, v| ENV[k] = v }
-      yield
-    ensure
-      env.clear.each { |k, v| ENV.delete(k) }
+    def read_dynamic_file(local_file)
+      StringIO.new(render_dynamic_erb(File.read(local_file)))
     end
 
-    def read_dynamic_file(local_file)
-      StringIO.new(ERB.new(File.read(local_file)).result)
+    # Render with a per-call ENV constant so parallel host threads cannot
+    # clobber process-global ENV (SSHKit runs on(hosts) in :parallel).
+    def render_dynamic_erb(template)
+      renderer = Class.new
+      renderer.const_set(:ENV, ENV.to_h.merge(env.to_h))
+      renderer.class_eval <<~RUBY, __FILE__, __LINE__ + 1
+        def render(template)
+          ::ERB.new(template).result(binding)
+        end
+      RUBY
+      renderer.new.render(template)
     end
 
     def expand_remote_file(remote_file)
@@ -167,22 +180,55 @@ class Kamal::Configuration::Accessory
       accessory_config["volumes"] || []
     end
 
-    def remote_files_as_volumes
-      accessory_config["files"]&.collect do |local_to_remote_mapping|
-        _, remote_file = local_to_remote_mapping.split(":")
-        "#{service_data_directory + remote_file}:#{remote_file}"
-      end || []
+    def docker_options
+      accessory_config["options"] || {}
     end
 
-    def remote_directories_as_volumes
-      accessory_config["directories"]&.collect do |host_to_container_mapping|
-        host_path, container_path = host_to_container_mapping.split(":")
-        [ expand_host_path(host_path), container_path ].join(":")
-      end || []
+    def restart_policy_option
+      docker_options.find { |key, _| key.to_s == "restart" }&.last
+    end
+
+    def path_volumes(paths)
+      paths.map do |local, config|
+        Kamal::Configuration::Volume.new \
+          host_path: config[:host_path],
+          container_path: config[:container_path],
+          options: config[:options]
+      end
+    end
+
+    def parse_path_config(config, default_mode:)
+      if config.is_a?(Hash)
+        local, remote = config["local"], config["remote"]
+        expanded = yield(local, remote)
+        [
+          expanded[:key],
+          expanded.except(:key).merge(
+            options: config["options"],
+            mode: config["mode"] || default_mode,
+            owner: config["owner"]
+          )
+        ]
+      else
+        local, remote, options = config.split(":", 3)
+        expanded = yield(local, remote)
+        [
+          expanded[:key],
+          expanded.except(:key).merge(
+            options: options,
+            mode: default_mode,
+            owner: nil
+          )
+        ]
+      end
     end
 
     def expand_host_path(host_path)
       absolute_path?(host_path) ? host_path : File.join(service_data_directory, host_path)
+    end
+
+    def expand_host_path_for_volume(host_path)
+      absolute_path?(host_path) ? host_path : File.join(service_name, host_path)
     end
 
     def absolute_path?(path)
@@ -229,6 +275,43 @@ class Kamal::Configuration::Accessory
 
     def network
       accessory_config["network"] || DEFAULT_NETWORK
+    end
+
+    def ensure_valid_port
+      ensure_bound_publish port, "port"
+
+      # `options` passes flags straight to `docker run`, so publishing through it
+      # has to clear the same bar as `port`.
+      Array(docker_options["publish"]).each { |publish| ensure_bound_publish publish.to_s, "options/publish" }
+    end
+
+    def ensure_bound_publish(port_config, key)
+      return if port_config.blank?
+
+      host = port_config.split("/", 2).first
+
+      bound =
+        if host.start_with?("[")
+          (ip = host[/\A\[([^\]]+)\]/, 1]) && valid_ip?(ip)
+        elsif host.count(":") >= 2
+          valid_ip?(host.split(":").first)
+        end
+
+      require_bind_host! port_config, key unless bound
+    end
+
+    def valid_ip?(str)
+      IPAddr.new(str)
+      true
+    rescue IPAddr::InvalidAddressError, ArgumentError, TypeError
+      false
+    end
+
+    def require_bind_host!(port_config, key)
+      raise Kamal::ConfigurationError,
+        "accessories/#{name}: #{key} \"#{port_config}\" must name a bind address — " \
+        "\"127.0.0.1:PORT:PORT\" to keep it private, \"0.0.0.0:PORT:PORT\" to publish it. " \
+        "Run `kamal accessory reboot #{name}` to rebind an existing container."
     end
 
     def ensure_valid_roles

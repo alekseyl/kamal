@@ -6,8 +6,7 @@ class Kamal::Configuration::Proxy
 
   delegate :argumentize, :optionize, to: Kamal::Utils
 
-  attr_reader :config, :proxy_config, :role_name, :secrets
-
+  attr_reader :config, :proxy_config, :role_name, :run, :secrets
   def initialize(config:, proxy_config:, role_name: nil, secrets:, context: "proxy")
     @config = config
     @proxy_config = proxy_config
@@ -15,6 +14,7 @@ class Kamal::Configuration::Proxy
     @role_name = role_name
     @secrets = secrets
     validate! @proxy_config, with: Kamal::Configuration::Validator::Proxy, context: context
+    @run = Kamal::Configuration::Proxy::Run.new(config, run_config: @proxy_config["run"], context: "#{context}/run") if @proxy_config && @proxy_config["run"].present?
   end
 
   def app_port
@@ -63,6 +63,10 @@ class Kamal::Configuration::Proxy
     tls_path(config.proxy_boot.tls_container_directory, "key.pem") if custom_ssl_certificate?
   end
 
+  def path_prefixes
+    proxy_config["path_prefixes"] || proxy_config["path_prefix"]&.split(",") || []
+  end
+
   def deploy_options
     {
       host: hosts,
@@ -80,7 +84,7 @@ class Kamal::Configuration::Proxy
       "buffer-memory": proxy_config.dig("buffering", "memory"),
       "max-request-body": proxy_config.dig("buffering", "max_request_body"),
       "max-response-body": proxy_config.dig("buffering", "max_response_body"),
-      "path-prefix": proxy_config.dig("path_prefix"),
+      "path-prefix": path_prefixes,
       "strip-path-prefix": proxy_config.dig("strip_path_prefix"),
       "forward-headers": proxy_config.dig("forward_headers"),
       "tls-redirect": proxy_config.dig("ssl_redirect"),

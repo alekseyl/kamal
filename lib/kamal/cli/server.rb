@@ -1,32 +1,42 @@
 class Kamal::Cli::Server < Kamal::Cli::Base
   desc "exec", "Run a custom command on the server (use --help to show options)"
   option :interactive, type: :boolean, aliases: "-i", default: false, desc: "Run the command interactively (use for console/bash)"
+  option :raw, type: :boolean, default: false, desc: "Output raw, unmodified stdout"
   def exec(*cmd)
-    pre_connect_if_required
+    raw = options[:raw]
 
-    cmd = Kamal::Utils.join_commands(cmd)
-    hosts = KAMAL.hosts
+    if raw && options[:interactive]
+      raise ArgumentError, "Raw is not compatible with interactive"
+    end
 
-    case
-    when options[:interactive]
-      host = KAMAL.primary_host
+    with_raw_output(raw) do
+      pre_connect_if_required
 
-      say "Running '#{cmd}' on #{host} interactively...", :magenta
+      cmd = Kamal::Utils.join_commands(cmd)
+      hosts = KAMAL.hosts
+      quiet = options[:quiet]
 
-      run_locally { exec KAMAL.server.run_over_ssh(cmd, host: host) }
-    else
-      say "Running '#{cmd}' on #{hosts.join(', ')}...", :magenta
+      case
+      when options[:interactive]
+        host = KAMAL.primary_host
 
-      on(hosts) do |host|
-        execute *KAMAL.auditor.record("Executed cmd '#{cmd}' on #{host}"), verbosity: :debug
-        puts_by_host host, capture_with_info(cmd)
+        say "Running '#{cmd}' on #{host} interactively...", :magenta
+
+        run_locally { exec KAMAL.server.run_over_ssh(cmd, host: host) }
+      else
+        say "Running '#{cmd}' on #{hosts.join(', ')}...", :magenta
+
+        on(hosts) do |host|
+          execute *KAMAL.auditor.record("Executed cmd '#{cmd}' on #{host}"), verbosity: :debug
+          puts_by_host host, capture_with_info(cmd, strip: !raw), quiet: quiet, raw: raw
+        end
       end
     end
   end
 
   desc "bootstrap", "Set up Docker to run Kamal apps"
   def bootstrap
-    with_lock do
+    modify(lock: true) do
       missing = []
 
       on(KAMAL.hosts) do |host|
@@ -34,6 +44,16 @@ class Kamal::Cli::Server < Kamal::Cli::Base
           if execute(*KAMAL.docker.superuser?, raise_on_non_zero_exit: false)
             info "Missing Docker on #{host}. Installing…"
             execute *KAMAL.docker.install
+
+            unless execute(*KAMAL.docker.root?, raise_on_non_zero_exit: false) ||
+                   execute(*KAMAL.docker.in_docker_group?, raise_on_non_zero_exit: false)
+              execute *KAMAL.docker.add_to_docker_group
+              begin
+                execute *KAMAL.docker.refresh_session
+              rescue IOError
+                info "Session refreshed due to group change."
+              end
+            end
           else
             missing << host
           end

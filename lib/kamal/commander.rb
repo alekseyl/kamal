@@ -1,9 +1,11 @@
 require "active_support/core_ext/enumerable"
 require "active_support/core_ext/module/delegation"
 require "active_support/core_ext/object/blank"
+require "active_support/broadcast_logger"
+require "active_support/notifications"
 
 class Kamal::Commander
-  attr_accessor :verbosity, :holding_lock, :connected
+  attr_accessor :verbosity, :holding_lock, :connected, :logging, :lock_wait, :lock_wait_timeout, :lock_wait_interval
   attr_reader :specific_roles, :specific_hosts
   delegate :hosts, :roles, :primary_host, :primary_role, :roles_on, :app_hosts, :proxy_hosts, :accessory_hosts, to: :specifics
 
@@ -15,13 +17,19 @@ class Kamal::Commander
     self.verbosity = :info
     self.holding_lock = ENV["KAMAL_LOCK"] == "true"
     self.connected = false
+    self.logging = false
+    self.lock_wait = false
+    self.lock_wait_timeout = 900
+    self.lock_wait_interval = 15
+    @modify_depth = 0
     @specifics = @specific_roles = @specific_hosts = nil
     @config = @config_kwargs = nil
+    @output_logger = nil
     @commands = {}
   end
 
   def config
-    @config ||= Kamal::Configuration.create_from(**@config_kwargs).tap do |config|
+    @config ||= Kamal::Configuration.create_from(**@config_kwargs.to_h).tap do |config|
       @config_kwargs = nil
       configure_sshkit_with(config)
     end
@@ -46,27 +54,19 @@ class Kamal::Commander
 
   def specific_roles=(role_names)
     @specifics = nil
-    if role_names.present?
-      @specific_roles = Kamal::Utils.filter_specific_items(role_names, config.roles)
-
-      if @specific_roles.empty?
-        raise ArgumentError, "No --roles match for #{role_names.join(',')}"
-      end
-
-      @specific_roles
+    @specific_roles = if role_names.present?
+      filtered = Kamal::Utils.filter_specific_items(role_names, config.roles)
+      raise ArgumentError, "No --roles match for #{role_names.join(',')}" if filtered.empty?
+      filtered
     end
   end
 
   def specific_hosts=(hosts)
     @specifics = nil
-    if hosts.present?
-      @specific_hosts = Kamal::Utils.filter_specific_items(hosts, config.all_hosts)
-
-      if @specific_hosts.empty?
-        raise ArgumentError, "No --hosts match for #{hosts.join(',')}"
-      end
-
-      @specific_hosts
+    @specific_hosts = if hosts.present?
+      filtered = Kamal::Utils.filter_specific_items(hosts, config.all_hosts)
+      raise ArgumentError, "No --hosts match for #{hosts.join(',')}" if filtered.empty?
+      filtered
     end
   end
 
@@ -109,8 +109,8 @@ class Kamal::Commander
     @commands[:lock] ||= Kamal::Commands::Lock.new(config)
   end
 
-  def proxy
-    @commands[:proxy] ||= Kamal::Commands::Proxy.new(config)
+  def proxy(host)
+    Kamal::Commands::Proxy.new(config, host: host)
   end
 
   def prune
@@ -129,6 +129,15 @@ class Kamal::Commander
     config.aliases[name]
   end
 
+  def resolve_alias(name)
+    if @config
+      @config.aliases[name]&.command
+    else
+      raw_config = Kamal::Configuration.load_raw_config(**@config_kwargs.to_h.slice(:config_file, :destination))
+      raw_config[:aliases]&.dig(name)
+    end
+  end
+
   def with_verbosity(level)
     old_level = self.verbosity
 
@@ -141,6 +150,22 @@ class Kamal::Commander
     SSHKit.config.output_verbosity = old_level
   end
 
+  def modify(command:, subcommand:)
+    @logging = true
+    if modify_started
+      ActiveSupport::Notifications.instrument("modify.kamal",
+        command: command, subcommand: subcommand, destination: config.destination, hosts: hosts) { yield }
+    else
+      yield
+    end
+  ensure
+    output_logger.close if modify_finished
+  end
+
+  def log(line)
+    output_logger << "#{line}\n" if logging
+  end
+
   def holding_lock?
     self.holding_lock
   end
@@ -150,15 +175,45 @@ class Kamal::Commander
   end
 
   private
+    def output_logger
+      @output_logger ||= ActiveSupport::BroadcastLogger.new
+    end
+
+    def modify_started
+      @modify_depth += 1
+      @modify_depth == 1
+    end
+
+    def modify_finished
+      @modify_depth -= 1
+      @modify_depth == 0
+    end
+
     # Lazy setup of SSHKit
     def configure_sshkit_with(config)
       SSHKit::Backend::Netssh.pool.idle_timeout = config.sshkit.pool_idle_timeout
       SSHKit::Backend::Netssh.configure do |sshkit|
         sshkit.max_concurrent_starts = config.sshkit.max_concurrent_starts
+        sshkit.dns_retries = config.sshkit.dns_retries
         sshkit.ssh_options = config.ssh.options
       end
       SSHKit.config.command_map[:docker] = "docker" # No need to use /usr/bin/env, just clogs up the logs
       SSHKit.config.output_verbosity = verbosity
+
+      configure_output_with(config)
+    end
+
+    def configure_output_with(config)
+      return unless config.output.enabled?
+
+      config.output.loggers.each { |logger| output_logger.broadcast_to(logger) }
+
+      SSHKit.config.output = Kamal::Output::Formatter.new($stdout, output_logger)
+
+      at_exit { @output_logger&.close }
+    rescue => e
+      $stderr.puts "Output logger setup failed: #{e.class}: #{e.message}"
+      $stderr.puts e.backtrace.join("\n") if ENV["VERBOSE"]
     end
 
     def specifics

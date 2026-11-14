@@ -25,13 +25,14 @@ proxy:
 
 # Credentials for your image host.
 registry:
+  server: localhost:5555
   # Specify the registry server, if you're not using Docker Hub
   # server: registry.digitalocean.com / ghcr.io / ...
-  username: my-user
+  # username: my-user
 
   # Always use an access token rather than real password (pulled from .kamal/secrets).
-  password:
-    - KAMAL_REGISTRY_PASSWORD
+  # password:
+  #   - KAMAL_REGISTRY_PASSWORD
 
 # Configure builder setup.
 builder:
@@ -82,7 +83,7 @@ builder:
 #   db:
 #     image: mysql:8.0
 #     host: 192.168.0.2
-#     port: 3306
+#     port: "127.0.0.1:3306:3306"
 #     env:
 #       clear:
 #         MYSQL_ROOT_HOST: '%'
@@ -96,6 +97,6 @@ builder:
 #   redis:
 #     image: valkey/valkey:8
 #     host: 192.168.0.2
-#     port: 6379
+#     port: "127.0.0.1:6379:6379"
 #     directories:
 #       - data:/data

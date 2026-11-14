@@ -17,6 +17,13 @@ class CommandsAppTest < ActiveSupport::TestCase
       new_command.run.join(" ")
   end
 
+  test "run with destination" do
+    @destination = "staging"
+    assert_equal \
+      "docker run --detach --restart unless-stopped --name app-web-staging-999 --network kamal --env KAMAL_CONTAINER_NAME=\"app-web-staging-999\" --env KAMAL_VERSION=\"999\" --env KAMAL_HOST=\"1.1.1.1\" --env KAMAL_DESTINATION=\"staging\" --env-file .kamal/apps/app-staging/env/roles/web.env --log-opt max-size=\"10m\" --label service=\"app\" --label role=\"web\" --label destination=\"staging\" dhh/app:999",
+      new_command.run.join(" ")
+  end
+
   test "run with hostname" do
     assert_equal \
       "docker run --detach --restart unless-stopped --name app-web-999 --network kamal --hostname myhost --env KAMAL_CONTAINER_NAME=\"app-web-999\" --env KAMAL_VERSION=\"999\" --env KAMAL_HOST=\"1.1.1.1\" --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size=\"10m\" --label service=\"app\" --label role=\"web\" --label destination dhh/app:999",
@@ -36,6 +43,14 @@ class CommandsAppTest < ActiveSupport::TestCase
     assert_equal \
       "docker run --detach --restart unless-stopped --name app-jobs-999 --network kamal --env KAMAL_CONTAINER_NAME=\"app-jobs-999\" --env KAMAL_VERSION=\"999\" --env KAMAL_HOST=\"1.1.1.2\" --env-file .kamal/apps/app/env/roles/jobs.env --log-opt max-size=\"10m\" --label service=\"app\" --label role=\"jobs\" --label destination --mount \"somewhere\" --cap-add dhh/app:999 bin/jobs",
       new_command(role: "jobs", host: "1.1.1.2").run.join(" ")
+  end
+
+  test "run with custom restart policy" do
+    @config[:servers] = { "web" => { "hosts" => [ "1.1.1.1" ], "options" => { "restart" => "on-failure" } } }
+
+    assert_equal \
+      "docker run --detach --restart on-failure --name app-web-999 --network kamal --env KAMAL_CONTAINER_NAME=\"app-web-999\" --env KAMAL_VERSION=\"999\" --env KAMAL_HOST=\"1.1.1.1\" --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size=\"10m\" --label service=\"app\" --label role=\"web\" --label destination dhh/app:999",
+      new_command.run.join(" ")
   end
 
   test "run with logging config" do
@@ -94,9 +109,20 @@ class CommandsAppTest < ActiveSupport::TestCase
       new_command(role: "workers").stop.join(" ")
   end
 
+  test "stop with stop_timeout" do
+    @config[:servers] = { "web" => { "hosts" => [ "1.1.1.1" ], "stop_timeout" => 30 }, "workers" => { "hosts" => [ "1.1.1.2" ], "cmd" => "bin/jobs", "stop_timeout" => 60 } }
+    assert_equal \
+      "sh -c 'docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''{{.ID}}'\\'') ; docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting' | head -1 | xargs docker stop -t 30",
+      new_command.stop.join(" ")
+
+    assert_equal \
+      "sh -c 'docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=workers --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''{{.ID}}'\\'') ; docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=workers --filter status=running --filter status=restarting' | head -1 | xargs docker stop -t 60",
+      new_command(role: "workers").stop.join(" ")
+  end
+
   test "stop with version" do
     assert_equal \
-      "docker container ls --all --filter name=^app-web-123$ --quiet | xargs docker stop",
+      "docker container ls --all --filter 'name=^app-web-123$' --quiet | xargs docker stop",
       new_command.stop(version: "123").join(" ")
   end
 
@@ -157,7 +183,7 @@ class CommandsAppTest < ActiveSupport::TestCase
 
   test "logs with container_id" do
     assert_equal \
-      "echo C137 | xargs docker logs --timestamps 2>&1",
+      "sh -c 'echo C137' | xargs docker logs --timestamps 2>&1",
       new_command.logs(container_id: "C137").join(" ")
   end
 
@@ -213,7 +239,7 @@ class CommandsAppTest < ActiveSupport::TestCase
       new_command.follow_logs(host: "app-1", grep: "Completed")
 
     assert_equal \
-      "ssh -t root@app-1 -p 22 'echo ID321 | xargs docker logs --timestamps --follow 2>&1'",
+      "ssh -t root@app-1 -p 22 'sh -c '\\''echo ID321'\\'' | xargs docker logs --timestamps --follow 2>&1'",
       new_command.follow_logs(host: "app-1", container_id: "ID321")
 
     assert_equal \
@@ -227,32 +253,64 @@ class CommandsAppTest < ActiveSupport::TestCase
     assert_equal \
       "ssh -t root@app-1 -p 22 'sh -c '\\''docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''\\'\\'''\\''{{.ID}}'\\''\\'\\'''\\'') ; docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting'\\'' | head -1 | xargs docker logs --tail 123 --follow 2>&1 | grep \"Completed\"'",
       new_command.follow_logs(host: "app-1", timestamps: false, lines: 123, grep: "Completed")
+
+    assert_equal \
+      "ssh -t root@app-1 -p 22 'sh -c '\\''docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''\\'\\'''\\''{{.ID}}'\\''\\'\\'''\\'') ; docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting'\\'' | head -1 | xargs docker logs --timestamps --since 5m --follow 2>&1'",
+      new_command.follow_logs(host: "app-1", since: "5m")
+
+    assert_equal \
+      "ssh -t root@app-1 -p 22 'sh -c '\\''docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''\\'\\'''\\''{{.ID}}'\\''\\'\\'''\\'') ; docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting'\\'' | head -1 | xargs docker logs --timestamps --since 5m --tail 123 --follow 2>&1'",
+      new_command.follow_logs(host: "app-1", since: "5m", lines: 123)
+
+    assert_equal \
+      "ssh -t root@app-1 -p 22 'sh -c '\\''docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''\\'\\'''\\''{{.ID}}'\\''\\'\\'''\\'') ; docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting'\\'' | head -1 | xargs docker logs --timestamps --since 5m --follow 2>&1 | grep \"Completed\"'",
+      new_command.follow_logs(host: "app-1", since: "5m", grep: "Completed")
   end
 
+  test "follow logs with ssh keys" do
+    @config[:ssh] = { "keys" => [ "path_to_key.pem" ] }
+    assert_equal \
+      "ssh -i path_to_key.pem -t root@app-1 -p 22 'sh -c '\\''docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''\\'\\'''\\''{{.ID}}'\\''\\'\\'''\\'') ; docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting'\\'' | head -1 | xargs docker logs --timestamps --follow 2>&1'",
+      new_command.follow_logs(host: "app-1")
+  end
+
+  test "follow logs with ssh proxy_command" do
+    @config[:ssh] = { "proxy_command" => "ssh -W %h:%p user@proxy-server" }
+    assert_equal \
+      "ssh -o ProxyCommand='ssh -W %h:%p user@proxy-server' -t root@app-1 -p 22 'sh -c '\\''docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''\\'\\'''\\''{{.ID}}'\\''\\'\\'''\\'') ; docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting'\\'' | head -1 | xargs docker logs --timestamps --follow 2>&1'",
+      new_command.follow_logs(host: "app-1")
+  end
+
+  test "follow logs with ssh config file" do
+    @config[:ssh] = { "config" => "~/.ssh/custom_config" }
+    assert_equal \
+      "ssh -F ~/.ssh/custom_config -t root@app-1 -p 22 'sh -c '\\''docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''\\'\\'''\\''{{.ID}}'\\''\\'\\'''\\'') ; docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting'\\'' | head -1 | xargs docker logs --timestamps --follow 2>&1'",
+      new_command.follow_logs(host: "app-1")
+  end
 
   test "execute in new container" do
-    assert_equal \
-      "docker run --rm --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size=\"10m\" dhh/app:999 bin/rails db:setup",
+    assert_match \
+      %r{docker run --rm --name app-web-exec-999-[0-9a-f]{6} --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size="10m" dhh/app:999 bin/rails db:setup},
       new_command.execute_in_new_container("bin/rails", "db:setup", env: {}).join(" ")
   end
 
   test "execute in new container with logging" do
     @config[:logging] = { "driver" => "local", "options" => { "max-size" => "100m", "max-file" => "3" } }
 
-    assert_equal \
-      "docker run --rm --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-driver \"local\" --log-opt max-size=\"100m\" --log-opt max-file=\"3\" dhh/app:999 bin/rails db:setup",
+    assert_match \
+      %r{docker run --rm --name app-web-exec-999-[0-9a-f]{6} --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-driver "local" --log-opt max-size="100m" --log-opt max-file="3" dhh/app:999 bin/rails db:setup},
       new_command.execute_in_new_container("bin/rails", "db:setup", env: {}).join(" ")
   end
 
   test "execute in new container with env" do
-    assert_equal \
-      "docker run --rm --network kamal --env-file .kamal/apps/app/env/roles/web.env --env foo=\"bar\" --log-opt max-size=\"10m\" dhh/app:999 bin/rails db:setup",
+    assert_match \
+      %r{docker run --rm --name app-web-exec-999-[0-9a-f]{6} --network kamal --env-file .kamal/apps/app/env/roles/web.env --env foo="bar" --log-opt max-size="10m" dhh/app:999 bin/rails db:setup},
       new_command.execute_in_new_container("bin/rails", "db:setup", env: { "foo" => "bar" }).join(" ")
   end
 
   test "execute in new detached container" do
-    assert_equal \
-      "docker run --detach --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size=\"10m\" dhh/app:999 bin/rails db:setup",
+    assert_match \
+      %r{docker run --detach --name app-web-exec-999-[0-9a-f]{6} --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size="10m" dhh/app:999 bin/rails db:setup},
       new_command.execute_in_new_container("bin/rails", "db:setup", detach: true, env: {}).join(" ")
   end
 
@@ -260,16 +318,25 @@ class CommandsAppTest < ActiveSupport::TestCase
     @config[:servers] = [ { "1.1.1.1" => "tag1" } ]
     @config[:env]["tags"] = { "tag1" => { "ENV1" => "value1" } }
 
-    assert_equal \
-      "docker run --rm --network kamal --env ENV1=\"value1\" --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size=\"10m\" dhh/app:999 bin/rails db:setup",
+    assert_match \
+      %r{docker run --rm --name app-web-exec-999-[0-9a-f]{6} --network kamal --env ENV1="value1" --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size="10m" dhh/app:999 bin/rails db:setup},
       new_command.execute_in_new_container("bin/rails", "db:setup", env: {}).join(" ")
   end
 
   test "execute in new container with custom options" do
     @config[:servers] = { "web" => { "hosts" => [ "1.1.1.1" ], "options" => { "mount" => "somewhere", "cap-add" => true } } }
-    assert_equal \
-      "docker run --rm --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size=\"10m\" --mount \"somewhere\" --cap-add dhh/app:999 bin/rails db:setup",
+    assert_match \
+      %r{docker run --rm --name app-web-exec-999-[0-9a-f]{6} --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size="10m" --mount "somewhere" --cap-add dhh/app:999 bin/rails db:setup},
       new_command.execute_in_new_container("bin/rails", "db:setup", env: {}).join(" ")
+  end
+
+  test "execute in new container excludes restart policy" do
+    @config[:servers] = { "web" => { "hosts" => [ "1.1.1.1" ], "options" => { "restart" => "on-failure", "mount" => "somewhere" } } }
+
+    command = new_command.execute_in_new_container("bin/rails", "db:setup", env: {}).join(" ")
+
+    assert_match %r{docker run --rm --name app-web-exec-999-[0-9a-f]{6} --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size="10m" --mount "somewhere" dhh/app:999 bin/rails db:setup}, command
+    assert_no_match(/--restart/, command)
   end
 
   test "execute in existing container" do
@@ -285,7 +352,7 @@ class CommandsAppTest < ActiveSupport::TestCase
   end
 
   test "execute in new container over ssh" do
-    assert_match %r{docker run -it --rm --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size="10m" dhh/app:999 bin/rails c},
+    assert_match %r{docker run -it --rm --name app-web-exec-999-[0-9a-f]{6} --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size="10m" dhh/app:999 bin/rails c},
       stub_stdin_tty { new_command.execute_in_new_container_over_ssh("bin/rails", "c", env: {}) }
   end
 
@@ -293,13 +360,13 @@ class CommandsAppTest < ActiveSupport::TestCase
     @config[:servers] = [ { "1.1.1.1" => "tag1" } ]
     @config[:env]["tags"] = { "tag1" => { "ENV1" => "value1" } }
 
-    assert_equal "ssh -t root@1.1.1.1 -p 22 'docker run -it --rm --network kamal --env ENV1=\"value1\" --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size=\"10m\" dhh/app:999 bin/rails c'",
+    assert_match %r{ssh -t root@1.1.1.1 -p 22 'docker run -it --rm --name app-web-exec-999-[0-9a-f]{6} --network kamal --env ENV1="value1" --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size="10m" dhh/app:999 bin/rails c'},
       stub_stdin_tty { new_command.execute_in_new_container_over_ssh("bin/rails", "c", env: {}) }
   end
 
   test "execute in new container with custom options over ssh" do
     @config[:servers] = { "web" => { "hosts" => [ "1.1.1.1" ], "options" => { "mount" => "somewhere", "cap-add" => true } } }
-    assert_match %r{docker run -it --rm --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size=\"10m\" --mount \"somewhere\" --cap-add dhh/app:999 bin/rails c},
+    assert_match %r{docker run -it --rm --name app-web-exec-999-[0-9a-f]{6} --network kamal --env-file .kamal/apps/app/env/roles/web.env --log-opt max-size=\"10m\" --mount \"somewhere\" --cap-add dhh/app:999 bin/rails c},
       stub_stdin_tty { new_command.execute_in_new_container_over_ssh("bin/rails", "c", env: {}) }
   end
 
@@ -357,6 +424,26 @@ class CommandsAppTest < ActiveSupport::TestCase
     assert_equal "ssh -o ProxyCommand='ssh -W %h:%p user@proxy-server' -t root@1.1.1.1 -p 22 'ls'", new_command.run_over_ssh("ls", host: "1.1.1.1")
   end
 
+  test "run over ssh with config file" do
+    @config[:ssh] = { "config" => "~/.ssh/custom_config" }
+    assert_equal "ssh -F ~/.ssh/custom_config -t root@1.1.1.1 -p 22 'ls'", new_command.run_over_ssh("ls", host: "1.1.1.1")
+  end
+
+  test "run over ssh with multiple config files" do
+    @config[:ssh] = { "config" => [ "~/.ssh/config1", "~/.ssh/config2" ] }
+    assert_equal "ssh -F ~/.ssh/config1 -F ~/.ssh/config2 -t root@1.1.1.1 -p 22 'ls'", new_command.run_over_ssh("ls", host: "1.1.1.1")
+  end
+
+  test "run over ssh with config false" do
+    @config[:ssh] = { "config" => false }
+    assert_equal "ssh -F /dev/null -t root@1.1.1.1 -p 22 'ls'", new_command.run_over_ssh("ls", host: "1.1.1.1")
+  end
+
+  test "run over ssh with config true" do
+    @config[:ssh] = { "config" => true }
+    assert_equal "ssh -t root@1.1.1.1 -p 22 'ls'", new_command.run_over_ssh("ls", host: "1.1.1.1")
+  end
+
   test "current_running_container_id" do
     assert_equal \
     "sh -c 'docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''{{.ID}}'\\'') ; docker ps --latest --quiet --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting' | head -1",
@@ -372,7 +459,7 @@ class CommandsAppTest < ActiveSupport::TestCase
 
   test "container_id_for" do
     assert_equal \
-      "docker container ls --all --filter name=^app-999$ --quiet",
+      "docker container ls --all --filter 'name=^app-999$' --quiet",
       new_command.container_id_for(container_name: "app-999").join(" ")
   end
 
@@ -413,14 +500,14 @@ class CommandsAppTest < ActiveSupport::TestCase
 
   test "remove_container" do
     assert_equal \
-      "docker container ls --all --filter name=^app-web-999$ --quiet | xargs docker container rm",
+      "docker container ls --all --filter 'name=^app-web-999$' --quiet | xargs docker container rm",
       new_command.remove_container(version: "999").join(" ")
   end
 
   test "remove_container with destination" do
     @destination = "staging"
     assert_equal \
-      "docker container ls --all --filter name=^app-web-staging-999$ --quiet | xargs docker container rm",
+      "docker container ls --all --filter 'name=^app-web-staging-999$' --quiet | xargs docker container rm",
       new_command.remove_container(version: "999").join(" ")
   end
 

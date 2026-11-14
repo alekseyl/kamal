@@ -1,6 +1,8 @@
 class Kamal::Commands::Builder::Local < Kamal::Commands::Builder::Base
   def create
-    docker :buildx, :create, "--name", builder_name, "--driver=#{driver}" unless docker_driver?
+    return if docker_driver?
+
+    docker :buildx, :create, "--name", builder_name, "--driver=#{driver}", *driver_options
   end
 
   def remove
@@ -9,6 +11,10 @@ class Kamal::Commands::Builder::Local < Kamal::Commands::Builder::Base
 
   private
     def builder_name
-      "kamal-local-#{driver}"
+      if registry_config.local?
+        "kamal-local-registry-#{driver}-#{registry_digest}"
+      else
+        "kamal-local-#{driver}-#{registry_digest}"
+      end
     end
 end

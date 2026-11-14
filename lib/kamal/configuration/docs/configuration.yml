@@ -73,7 +73,10 @@ env:
 # This requires that file names change when the contents change
 # (e.g., by including a hash of the contents in the name).
 #
-# To configure this, set the path to the assets:
+# To configure this, set the path to the assets.
+#
+# You can also specify mount options after a colon, such as `ro` for read-only
+# or `z`/`Z` for SELinux labels
 asset_path: /path/to/assets
 
 # Hooks path
@@ -82,10 +85,38 @@ asset_path: /path/to/assets
 # See https://kamal-deploy.org/docs/hooks for more information:
 hooks_path: /user_home/kamal/hooks
 
+# Hook output
+#
+# Hook output visibility. Can be set globally or per-hook.
+# CLI flags (`-v`, `-q`) override these settings.
+#
+# - `:quiet` - hook output is hidden
+# - `:verbose` - hook output is shown
+#
+# With no setting, hook output follows CLI verbosity flags.
+#
+# Note: Failed hooks always show output in the error message regardless of setting.
+#
+# Global setting for all hooks:
+hooks_output: :verbose
+# Or per-hook settings:
+hooks_output:
+  pre-deploy: :verbose
+  pre-build: :quiet
+
+# Secrets path
+#
+# Path to secrets, defaults to `.kamal/secrets`.
+# Kamal looks for `<secrets_path>-common` first and then `<secrets_path>`.
+# When using destinations, it instead looks for `<secrets_path>-common` first and then
+# `<secrets_path>.<destination>`. Later files override earlier ones.
+secrets_path: /user_home/kamal/secrets
+
 # Error pages
 #
 # A directory relative to the app root to find error pages for the proxy to serve.
-# Any files in the format 4xx.html or 5xx.html will be copied to the hosts.
+# Name each page after the HTTP status code it serves, e.g. 404.html, 500.html,
+# 502.html, 503.html, and 504.html.
 error_pages_path: public
 
 # Require destinations
@@ -129,6 +160,13 @@ deploy_timeout: 10
 #
 # How long to wait for a container to drain, default 30:
 drain_timeout: 10
+
+# Stop timeout
+#
+# How long to wait for a container to stop after SIGTERM, default is
+# the drain_timeout for non-proxied roles and 10s (Docker default) for proxied roles.
+# Can be overridden per role:
+stop_timeout: 30
 
 # Run directory
 #
@@ -175,6 +213,12 @@ boot:
 #
 # Docker logging configuration, see kamal docs logging:
 logging:
+  ...
+
+# Output
+#
+# Configure output loggers (OTel, file), see kamal docs output:
+output:
   ...
 
 # Aliases

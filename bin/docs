@@ -23,6 +23,7 @@ DOCS = {
   "configuration" => "Configuration overview",
   "env" => "Environment variables",
   "logging" => "Logging",
+  "output" => "Output",
   "proxy" => "Proxy",
   "registry" => "Docker Registry",
   "role" => "Roles",
@@ -77,7 +78,7 @@ class DocWriter
             place = :in_yaml
           end
         when :in_yaml, :in_empty_line_yaml
-          if line =~ /^ *#/
+          if line =~ /^ {0,4}#/
             output.puts "```"
             output.puts
             generate_line(line, heading: place == :in_empty_line_yaml)

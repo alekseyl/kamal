@@ -6,11 +6,13 @@ require "erb"
 require "net/ssh/proxy/jump"
 
 class Kamal::Configuration
-  delegate :service, :image, :labels, :hooks_path, to: :raw_config, allow_nil: true
+  HOOKS_OUTPUT_LEVELS = [ :quiet, :verbose ].freeze
+
+  delegate :service, :labels, :hooks_path, to: :raw_config, allow_nil: true
   delegate :argumentize, :optionize, to: Kamal::Utils
 
   attr_reader :destination, :raw_config, :secrets
-  attr_reader :accessories, :aliases, :boot, :builder, :env, :logging, :proxy, :proxy_boot, :servers, :ssh, :sshkit, :registry
+  attr_reader :accessories, :aliases, :boot, :builder, :env, :logging, :output, :proxy, :proxy_boot, :servers, :ssh, :sshkit, :registry
 
   include Validation
 
@@ -18,9 +20,13 @@ class Kamal::Configuration
     def create_from(config_file:, destination: nil, version: nil)
       ENV["KAMAL_DESTINATION"] = destination
 
-      raw_config = load_config_files(config_file, *destination_config_file(config_file, destination))
+      raw_config = load_raw_config(config_file: config_file, destination: destination)
 
       new raw_config, destination: destination, version: version
+    end
+
+    def load_raw_config(config_file:, destination: nil)
+      load_config_files(config_file, *destination_config_file(config_file, destination))
     end
 
     private
@@ -32,7 +38,9 @@ class Kamal::Configuration
         if file.exist?
           # Newer Psych doesn't load aliases by default
           load_method = YAML.respond_to?(:unsafe_load) ? :unsafe_load : :load
-          YAML.send(load_method, ERB.new(File.read(file)).result).symbolize_keys
+          template = File.read(file)
+          rendered = ERB.new(template, trim_mode: "-").result
+          YAML.send(load_method, rendered).symbolize_keys
         else
           raise "Configuration file not found in #{file}"
         end
@@ -50,7 +58,7 @@ class Kamal::Configuration
 
     validate! raw_config, example: validation_yml.symbolize_keys, context: "", with: Kamal::Configuration::Validator::Configuration
 
-    @secrets = Kamal::Secrets.new(destination: destination)
+    @secrets = Kamal::Secrets.new(destination: destination, secrets_path: secrets_path)
 
     # Eager load config to validate it, these are first as they have dependencies later on
     @servers = Servers.new(config: self)
@@ -63,6 +71,7 @@ class Kamal::Configuration
     @env = Env.new(config: @raw_config.env || {}, secrets: secrets)
 
     @logging = Logging.new(logging_config: @raw_config.logging)
+    @output = Output.new(config: self)
     @proxy = Proxy.new(config: self, proxy_config: @raw_config.proxy, secrets: secrets)
     @proxy_boot = Proxy::Boot.new(config: self)
     @ssh = Ssh.new(config: self)
@@ -76,6 +85,9 @@ class Kamal::Configuration
     ensure_no_traefik_reboot_hooks
     ensure_one_host_for_ssl_roles
     ensure_unique_hosts_for_ssl_roles
+    ensure_local_registry_remote_builder_has_ssh_url
+    ensure_no_conflicting_proxy_runs
+    ensure_valid_hooks_output!
   end
 
   def version=(version)
@@ -121,6 +133,14 @@ class Kamal::Configuration
     (roles + accessories).flat_map(&:hosts).uniq
   end
 
+  def host_roles(host)
+    roles.select { |role| role.hosts.include?(host) }
+  end
+
+  def host_accessories(host)
+    accessories.select { |accessory| accessory.hosts.include?(host) }
+  end
+
   def app_hosts
     roles.flat_map(&:hosts).uniq
   end
@@ -155,6 +175,18 @@ class Kamal::Configuration
 
   def proxy_hosts
     (proxy_roles.flat_map(&:hosts) + proxy_accessories.flat_map(&:hosts)).uniq
+  end
+
+  def image
+    name = raw_config&.image.presence
+    name ||= raw_config&.service if registry.local?
+
+    name
+  end
+
+  def proxy_run(host)
+    # We validate that all the config are identical for a host
+    proxy_runs(host.to_s).first
   end
 
   def repository
@@ -209,6 +241,10 @@ class Kamal::Configuration
     raw_config.drain_timeout || 30
   end
 
+  def stop_timeout
+    raw_config.stop_timeout
+  end
+
   def run_directory
     ".kamal"
   end
@@ -233,6 +269,10 @@ class Kamal::Configuration
     raw_config.hooks_path || ".kamal/hooks"
   end
 
+  def secrets_path
+    raw_config.secrets_path || ".kamal/secrets"
+  end
+
   def asset_path
     raw_config.asset_path
   end
@@ -251,6 +291,15 @@ class Kamal::Configuration
 
   def env_tag(name)
     env_tags.detect { |t| t.name == name.to_s }
+  end
+
+  def hooks_output_for(hook)
+    case raw_config.hooks_output
+    when Symbol, String
+      raw_config.hooks_output.to_sym
+    when Hash
+      raw_config.hooks_output[hook]&.to_sym
+    end
   end
 
   def to_h
@@ -282,9 +331,11 @@ class Kamal::Configuration
     end
 
     def ensure_required_keys_present
-      %i[ service image registry ].each do |key|
+      %i[ service registry ].each do |key|
         raise Kamal::ConfigurationError, "Missing required configuration for #{key}" unless raw_config[key].present?
       end
+
+      raise Kamal::ConfigurationError, "Missing required configuration for image" if image.blank?
 
       if raw_config.servers.nil?
         raise Kamal::ConfigurationError, "No servers or accessories specified" unless raw_config.accessories.present?
@@ -354,8 +405,46 @@ class Kamal::Configuration
       true
     end
 
+    def ensure_local_registry_remote_builder_has_ssh_url
+      if registry.local? && builder.remote?
+        unless URI(builder.remote).scheme == "ssh"
+          raise Kamal::ConfigurationError, "Local registry with remote builder requires an SSH URL (e.g., ssh://user@host)"
+        end
+      end
+
+      true
+    end
+
+    def ensure_no_conflicting_proxy_runs
+      all_hosts.each do |host|
+        run_configs = proxy_runs(host)
+        if run_configs.uniq.size > 1
+          raise Kamal::ConfigurationError, "Conflicting proxy run configurations for host #{host}"
+        end
+      end
+    end
+
+    def proxy_runs(host)
+      (host_roles(host) + host_accessories(host)).map(&:proxy).compact.map(&:run).compact
+    end
+
     def role_names
       raw_config.servers.is_a?(Array) ? [ "web" ] : raw_config.servers.keys.sort
+    end
+
+    def ensure_valid_hooks_output!
+      case raw_config.hooks_output
+      when Symbol, String
+        validate_hooks_output_level!(raw_config.hooks_output.to_sym)
+      when Hash
+        raw_config.hooks_output.each { |hook, level| validate_hooks_output_level!(level.to_sym, hook) }
+      end
+    end
+
+    def validate_hooks_output_level!(level, hook = nil)
+      return if HOOKS_OUTPUT_LEVELS.include?(level)
+      context = hook ? " for hook '#{hook}'" : ""
+      raise Kamal::ConfigurationError, "Invalid hooks_output '#{level}'#{context}, must be one of: #{HOOKS_OUTPUT_LEVELS.join(', ')}"
     end
 
     def git_version

@@ -1,9 +1,10 @@
 class Kamal::Cli::Main < Kamal::Cli::Base
   desc "setup", "Setup all accessories, push the env, and deploy app to servers"
   option :skip_push, aliases: "-P", type: :boolean, default: false, desc: "Skip image build and push"
+  option :no_cache, type: :boolean, default: false, desc: "Build without using Docker's build cache"
   def setup
     print_runtime do
-      with_lock do
+      modify(lock: true) do
         invoke_options = deploy_options
 
         say "Ensure Docker is installed...", :magenta
@@ -16,88 +17,96 @@ class Kamal::Cli::Main < Kamal::Cli::Base
 
   desc "deploy", "Deploy app to servers"
   option :skip_push, aliases: "-P", type: :boolean, default: false, desc: "Skip image build and push"
+  option :no_cache, type: :boolean, default: false, desc: "Build without using Docker's build cache"
   def deploy(boot_accessories: false)
-    runtime = print_runtime do
-      invoke_options = deploy_options
+    modify do
+      runtime = print_runtime do
+        invoke_options = deploy_options
 
-      if options[:skip_push]
-        say "Pull app image...", :magenta
-        invoke "kamal:cli:build:pull", [], invoke_options
-      else
-        say "Build and push app image...", :magenta
-        invoke "kamal:cli:build:deliver", [], invoke_options
+        if options[:skip_push]
+          say "Pull app image...", :magenta
+          invoke "kamal:cli:build:pull", [], invoke_options
+        else
+          say "Build and push app image...", :magenta
+          invoke "kamal:cli:build:deliver", [], invoke_options
+        end
+
+        modify(lock: true) do
+          run_hook "pre-deploy", secrets: true
+
+          say "Ensure kamal-proxy is running...", :magenta
+          invoke "kamal:cli:proxy:boot", [], invoke_options
+
+          invoke "kamal:cli:accessory:boot", [ "all" ], invoke_options if boot_accessories
+
+          say "Detect stale containers...", :magenta
+          invoke "kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true)
+
+          invoke "kamal:cli:app:boot", [], invoke_options
+
+          say "Prune old containers and images...", :magenta
+          invoke "kamal:cli:prune:all", [], invoke_options
+        end
       end
 
-      with_lock do
-        run_hook "pre-deploy", secrets: true
-
-        say "Ensure kamal-proxy is running...", :magenta
-        invoke "kamal:cli:proxy:boot", [], invoke_options
-
-        invoke "kamal:cli:accessory:boot", [ "all" ], invoke_options if boot_accessories
-
-        say "Detect stale containers...", :magenta
-        invoke "kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true)
-
-        invoke "kamal:cli:app:boot", [], invoke_options
-
-        say "Prune old containers and images...", :magenta
-        invoke "kamal:cli:prune:all", [], invoke_options
-      end
+      run_hook "post-deploy", secrets: true, runtime: runtime.round.to_s
     end
-
-    run_hook "post-deploy", secrets: true, runtime: runtime.round.to_s
   end
 
   desc "redeploy", "Deploy app to servers without bootstrapping servers, starting kamal-proxy and pruning"
   option :skip_push, aliases: "-P", type: :boolean, default: false, desc: "Skip image build and push"
+  option :no_cache, type: :boolean, default: false, desc: "Build without using Docker's build cache"
   def redeploy
-    runtime = print_runtime do
-      invoke_options = deploy_options
+    modify do
+      runtime = print_runtime do
+        invoke_options = deploy_options
 
-      if options[:skip_push]
-        say "Pull app image...", :magenta
-        invoke "kamal:cli:build:pull", [], invoke_options
-      else
-        say "Build and push app image...", :magenta
-        invoke "kamal:cli:build:deliver", [], invoke_options
+        if options[:skip_push]
+          say "Pull app image...", :magenta
+          invoke "kamal:cli:build:pull", [], invoke_options
+        else
+          say "Build and push app image...", :magenta
+          invoke "kamal:cli:build:deliver", [], invoke_options
+        end
+
+        modify(lock: true) do
+          run_hook "pre-deploy", secrets: true
+
+          say "Detect stale containers...", :magenta
+          invoke "kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true)
+
+          invoke "kamal:cli:app:boot", [], invoke_options
+        end
       end
 
-      with_lock do
-        run_hook "pre-deploy", secrets: true
-
-        say "Detect stale containers...", :magenta
-        invoke "kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true)
-
-        invoke "kamal:cli:app:boot", [], invoke_options
-      end
+      run_hook "post-deploy", secrets: true, runtime: runtime.round.to_s
     end
-
-    run_hook "post-deploy", secrets: true, runtime: runtime.round.to_s
   end
 
   desc "rollback [VERSION]", "Rollback app to VERSION"
   def rollback(version)
     rolled_back = false
-    runtime = print_runtime do
-      with_lock do
-        invoke_options = deploy_options
 
-        KAMAL.config.version = version
-        old_version = nil
+    modify do
+      runtime = print_runtime do
+        modify(lock: true) do
+          invoke_options = deploy_options
 
-        if container_available?(version)
-          run_hook "pre-deploy", secrets: true
+          KAMAL.config.version = version
 
-          invoke "kamal:cli:app:boot", [], invoke_options.merge(version: version)
-          rolled_back = true
-        else
-          say "The app version '#{version}' is not available as a container (use 'kamal app containers' for available versions)", :red
+          if container_available?(version)
+            run_hook "pre-deploy", secrets: true
+
+            invoke "kamal:cli:app:boot", [], invoke_options.merge(version: version)
+            rolled_back = true
+          else
+            say "The app version '#{version}' is not available as a container (use 'kamal app containers' for available versions)", :red
+          end
         end
       end
-    end
 
-    run_hook "post-deploy", secrets: true, runtime: runtime.round.to_s if rolled_back
+      run_hook "post-deploy", secrets: true, runtime: runtime.round.to_s if rolled_back
+    end
   end
 
   desc "details", "Show details about all containers"
@@ -109,8 +118,9 @@ class Kamal::Cli::Main < Kamal::Cli::Base
 
   desc "audit", "Show audit log from servers"
   def audit
+    quiet = options[:quiet]
     on(KAMAL.hosts) do |host|
-      puts_by_host host, capture_with_info(*KAMAL.auditor.reveal)
+      puts_by_host host, capture_with_info(*KAMAL.auditor.reveal), quiet: quiet
     end
   end
 
@@ -178,11 +188,11 @@ class Kamal::Cli::Main < Kamal::Cli::Base
   option :confirmed, aliases: "-y", type: :boolean, default: false, desc: "Proceed without confirmation question"
   def remove
     confirming "This will remove all containers and images. Are you sure?" do
-      with_lock do
+      modify(lock: true) do
         invoke "kamal:cli:app:remove", [], options.without(:confirmed)
         invoke "kamal:cli:proxy:remove", [], options.without(:confirmed)
         invoke "kamal:cli:accessory:remove", [ "all" ], options
-        invoke "kamal:cli:registry:logout", [], options.without(:confirmed).merge(skip_local: true)
+        invoke "kamal:cli:registry:remove", [], options.without(:confirmed).merge(skip_local: true)
       end
     end
   end
@@ -192,7 +202,7 @@ class Kamal::Cli::Main < Kamal::Cli::Base
   option :rolling, type: :boolean, default: false, desc: "Upgrade one host at a time"
   def upgrade
     confirming "This will replace Traefik with kamal-proxy and restart all accessories" do
-      with_lock do
+      modify(lock: true) do
         if options[:rolling]
           KAMAL.hosts.each do |host|
             KAMAL.with_specific_hosts(host) do
@@ -272,6 +282,8 @@ class Kamal::Cli::Main < Kamal::Cli::Base
     end
 
     def deploy_options
-      { "version" => KAMAL.config.version }.merge(options.without("skip_push"))
+      base_options = options.without("skip_push")
+      base_options = base_options.except("no_cache") unless base_options["no_cache"]
+      { "version" => KAMAL.config.version }.merge(base_options)
     end
 end

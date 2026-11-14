@@ -43,6 +43,19 @@ class ConfigurationTest < ActiveSupport::TestCase
     end
   end
 
+  test "image uses service name if registry is local" do
+    assert_equal "app", Kamal::Configuration.new(@deploy.tap {
+      _1[:registry] = { "server" => "localhost:5000" }
+      _1.delete(:image)
+    }).image
+  end
+
+  test "image uses image if registry is local" do
+    assert_equal "dhh/app", Kamal::Configuration.new(@deploy.tap {
+      _1[:registry] = { "server" => "localhost:5000" }
+    }).image
+  end
+
   test "service name valid" do
     assert_nothing_raised do
       Kamal::Configuration.new(@deploy.tap { |config| config[:service] = "hey-app1_primary" })
@@ -409,5 +422,45 @@ class ConfigurationTest < ActiveSupport::TestCase
     end
 
     assert_equal "Different roles can't share the same host for SSL: foo.example.com", exception.message
+  end
+
+  test "hooks_output default is nil" do
+    assert_nil @config.hooks_output_for("pre-deploy")
+  end
+
+  test "hooks_output global setting" do
+    config = Kamal::Configuration.new(@deploy.merge(hooks_output: :verbose))
+    assert_equal :verbose, config.hooks_output_for("pre-deploy")
+    assert_equal :verbose, config.hooks_output_for("post-deploy")
+  end
+
+  test "hooks_output per-hook settings" do
+    config = Kamal::Configuration.new(@deploy.merge(
+      hooks_output: { "pre-deploy" => :verbose, "post-deploy" => :quiet }
+    ))
+    assert_equal :verbose, config.hooks_output_for("pre-deploy")
+    assert_equal :quiet, config.hooks_output_for("post-deploy")
+  end
+
+  test "hooks_output per-hook returns nil for unconfigured hooks" do
+    config = Kamal::Configuration.new(@deploy.merge(
+      hooks_output: { "pre-deploy" => :verbose }
+    ))
+    assert_equal :verbose, config.hooks_output_for("pre-deploy")
+    assert_nil config.hooks_output_for("post-deploy")
+  end
+
+  test "hooks_output invalid raises error" do
+    error = assert_raises(Kamal::ConfigurationError) do
+      Kamal::Configuration.new(@deploy.merge(hooks_output: :invalid))
+    end
+    assert_match /Invalid hooks_output 'invalid'/, error.message
+  end
+
+  test "hooks_output invalid per-hook raises error" do
+    error = assert_raises(Kamal::ConfigurationError) do
+      Kamal::Configuration.new(@deploy.merge(hooks_output: { "pre-deploy" => :invalid }))
+    end
+    assert_match /Invalid hooks_output 'invalid' for hook 'pre-deploy'/, error.message
   end
 end

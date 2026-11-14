@@ -36,7 +36,7 @@ class Kamal::Configuration::Role
   end
 
   def env_tags(host)
-    tagged_hosts.fetch(host).collect { |tag| config.env_tag(tag) }
+    tagged_hosts.fetch(host).collect { |tag| config.env_tag(tag) }.compact
   end
 
   def cmd
@@ -44,11 +44,11 @@ class Kamal::Configuration::Role
   end
 
   def option_args
-    if args = specializations["options"]
-      optionize args
-    else
-      []
-    end
+    optionize docker_options.reject { |key, _| key.to_s == "restart" }
+  end
+
+  def restart_policy
+    restart_policy_option || "unless-stopped"
   end
 
   def labels
@@ -81,9 +81,13 @@ class Kamal::Configuration::Role
 
   def stop_args
     # When deploying with the proxy, kamal-proxy will drain request before returning so we don't need to wait.
-    timeout = running_proxy? ? nil : config.drain_timeout
+    timeout = stop_timeout || (running_proxy? ? nil : config.drain_timeout)
 
     [ *argumentize("-t", timeout) ]
+  end
+
+  def stop_timeout
+    specializations["stop_timeout"] || config.stop_timeout
   end
 
   def env(host)
@@ -127,7 +131,7 @@ class Kamal::Configuration::Role
 
 
   def asset_path
-    specializations["asset_path"] || config.asset_path
+    asset_path_config&.dig(0)
   end
 
   def assets?
@@ -137,8 +141,12 @@ class Kamal::Configuration::Role
   def asset_volume(version = config.version)
     if assets?
       Kamal::Configuration::Volume.new \
-        host_path: asset_volume_directory(version), container_path: asset_path
+        host_path: asset_volume_directory(version), container_path: asset_path, options: asset_path_options
     end
+  end
+
+  def asset_path_options
+    asset_path_config&.dig(1)
   end
 
   def asset_extracted_directory(version = config.version)
@@ -213,10 +221,26 @@ class Kamal::Configuration::Role
       @role_config ||= config.raw_config.servers.is_a?(Array) ? {} : config.raw_config.servers[name]
     end
 
+    def docker_options
+      specializations["options"] || {}
+    end
+
+    def restart_policy_option
+      docker_options.find { |key, _| key.to_s == "restart" }&.last
+    end
+
     def custom_labels
       Hash.new.tap do |labels|
         labels.merge!(config.labels) if config.labels.present?
         labels.merge!(specializations["labels"]) if specializations["labels"].present?
       end
+    end
+
+    def asset_path_config
+      raw_path = specializations["asset_path"] || config.asset_path
+      return nil unless raw_path.present?
+
+      parts = raw_path.split(":", 2)
+      [ parts[0], parts[1] ]
     end
 end

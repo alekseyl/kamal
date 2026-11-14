@@ -89,9 +89,21 @@ proxy:
   #
   # For applications that split their traffic to different services based on the request path,
   # you can use path-based routing to mount services under different path prefixes.
-  path_prefix: '/api'
+  # Usage sample: path_prefix: '/api'
+  #
+  # You can also specify multiple paths in two ways.
+  #
+  # When using path_prefix you can supply multiple routes separated by commas.
+  path_prefix: "/api,/oauth_callback"
+  # You can also specify paths as a list of paths, the configuration will be
+  # rolled together into a comma separated string.
+  path_prefixes:
+    - "/api"
+    - "/oauth_callback"
   # By default, the path prefix will be stripped from the request before it is forwarded upstream.
+  #
   # So in the example above, a request to /api/users/123 will be forwarded to web-1 as /users/123.
+  #
   # To instead forward the request with the original path (including the prefix),
   # specify --strip-path-prefix=false
   strip_path_prefix: false
@@ -135,6 +147,30 @@ proxy:
     response_headers:
       - X-Request-ID
       - X-Request-Start
+
+  # Run configuration
+  #
+  # These options are used when booting the proxy container.
+  #
+  run:
+    http_port: 8080                # HTTP port to use (default 80)
+    https_port: 8443               # HTTPS port to use (default 443)
+    metrics_port: 9090             # Port for Prometheus metrics
+    debug: true                    # Debug logging (default: false)
+    log_max_size: "30m"            # Maximum log file size (default: "10m")
+    publish: false                 # Publish ports to the host (default: true)
+    bind_ips:                      # List of IPs to bind to when publishing ports
+      - 0.0.0.0
+    registry: registry:4443        # Container registry for the kamal-proxy image
+                                   # (defaults to Docker Hub)
+    repository: myrepo/kamal-proxy # Container repository for the kamal-proxy image
+                                   # (defaults to `basecamp/kamal-proxy`)
+    version: v0.8.0                # Version tag of the kamal-proxy image to use
+    options:                       # Additional options to pass to `docker run`
+      label:
+        - custom.label=kamal-proxy
+      memory: 512m
+      cpus: 0.5
 
 # Enabling/disabling the proxy on roles
 #

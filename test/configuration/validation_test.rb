@@ -6,7 +6,7 @@ class ConfigurationValidationTest < ActiveSupport::TestCase
   end
 
   test "wrong root types" do
-    [ :service, :image, :asset_path, :hooks_path, :primary_role, :minimum_version, :run_directory ].each do |key|
+    [ :service, :image, :asset_path, :hooks_path, :secrets_path, :primary_role, :minimum_version, :run_directory ].each do |key|
       assert_error "#{key}: should be a string", **{ key => [] }
     end
 
@@ -83,11 +83,13 @@ class ConfigurationValidationTest < ActiveSupport::TestCase
   test "ssh" do
     assert_error "ssh: unknown key: foo", ssh: { "foo" => "bar" }
     assert_error "ssh/user: should be a string", ssh: { "user" => [] }
+    assert_error "ssh/config: should be a boolean or a string or an array", ssh: { "config" => 1 }
   end
 
   test "sshkit" do
     assert_error "sshkit: unknown key: foo", sshkit: { "foo" => "bar" }
     assert_error "sshkit/max_concurrent_starts: should be an integer", sshkit: { "max_concurrent_starts" => "foo" }
+    assert_error "sshkit/dns_retries: should be an integer", sshkit: { "dns_retries" => "foo" }
   end
 
   test "builder" do
@@ -97,6 +99,23 @@ class ConfigurationValidationTest < ActiveSupport::TestCase
     assert_error "builder/args: should be a hash", builder: { "args" => [ "foo" ] }
     assert_error "builder/cache/options: should be a string", builder: { "cache" => { "options" => [] } }
     assert_error "builder: buildpacks only support building for one arch", builder: { "arch" => [ "amd64", "arm64" ], "pack" => { "builder" => "heroku/builder:24" } }
+  end
+
+  test "local registry with remote builder requires ssh url" do
+    assert_error "Local registry with remote builder requires an SSH URL (e.g., ssh://user@host)",
+      registry: { "server" => "localhost:5000" },
+      builder: { "arch" => remote_arch, "remote" => "docker-container://remote-builder" }
+
+    # Should not raise error with SSH URL
+    assert_nothing_raised do
+      Kamal::Configuration.new({
+        service: "app",
+        image: "app",
+        registry: { "server" => "localhost:5000" },
+        builder: { "arch" => remote_arch, "remote" => "ssh://user@host" },
+        servers: [ "1.1.1.1" ]
+      })
+    end
   end
 
   private

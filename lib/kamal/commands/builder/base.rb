@@ -1,3 +1,5 @@
+require "digest"
+
 class Kamal::Commands::Builder::Base < Kamal::Commands::Base
   class BuilderError < StandardError; end
 
@@ -14,13 +16,14 @@ class Kamal::Commands::Builder::Base < Kamal::Commands::Base
     docker :image, :rm, "--force", config.absolute_image
   end
 
-  def push(export_action = "registry", tag_as_dirty: false)
+  def push(export_action = "registry", tag_as_dirty: false, no_cache: false)
     docker :buildx, :build,
       "--output=type=#{export_action}",
       *platform_options(arches),
       *([ "--builder", builder_name ] unless docker_driver?),
       *build_tag_options(tag_as_dirty: tag_as_dirty),
       *build_options,
+      *([ "--no-cache" ] if no_cache),
       build_context,
       "2>&1"
   end
@@ -58,6 +61,14 @@ class Kamal::Commands::Builder::Base < Kamal::Commands::Base
 
   def first_mirror
     docker(:info, "--format '{{index .RegistryConfig.Mirrors 0}}'")
+  end
+
+  def login_to_registry_locally?
+    true
+  end
+
+  def push_env
+    {}
   end
 
   private
@@ -118,7 +129,25 @@ class Kamal::Commands::Builder::Base < Kamal::Commands::Base
       config.builder
     end
 
+    def registry_config
+      config.registry
+    end
+
+    def driver_options
+      if registry_config.local?
+        [ "--driver-opt", "network=host" ]
+      end
+    end
+
     def platform_options(arches)
       argumentize "--platform", arches.map { |arch| "linux/#{arch}" }.join(",") if arches.any?
+    end
+
+    # Buildx caches registry credentials on the builder, so a builder must not
+    # be shared between registry accounts. The digest is an identifier, not a
+    # secret: the name reveals which account an app pushes to.
+    def registry_digest
+      identity = [ registry_config.server || "docker.io", registry_config.username ]
+      Digest::SHA256.hexdigest(identity.join("\x00"))[0, 12]
     end
 end

@@ -5,7 +5,7 @@ class CliMainTest < CliTestCase
   teardown { ENV.clear; ENV.update @original_env }
 
   test "setup" do
-    invoke_options = { "config_file" => "test/fixtures/deploy_simple.yml", "version" => "999", "skip_hooks" => false }
+    invoke_options = base_invoke_options
 
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:server:bootstrap", [], invoke_options)
     Kamal::Cli::Main.any_instance.expects(:deploy).with(boot_accessories: true)
@@ -16,7 +16,7 @@ class CliMainTest < CliTestCase
   end
 
   test "setup with skip_push" do
-    invoke_options = { "config_file" => "test/fixtures/deploy_simple.yml", "version" => "999", "skip_hooks" => false }
+    invoke_options = base_invoke_options
 
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:server:bootstrap", [], invoke_options)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:accessory:boot", [ "all" ], invoke_options)
@@ -39,9 +39,55 @@ class CliMainTest < CliTestCase
     end
   end
 
+  test "deploy with local registry" do
+    with_test_secrets("secrets" => "DB_PASSWORD=secret") do
+      invoke_options = base_invoke_options(config_file: "deploy_with_local_registry.yml", verbose: true)
+
+      Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:deliver", [], invoke_options)
+      Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:boot", [], invoke_options)
+      Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true))
+      Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:boot", [], invoke_options)
+      Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:prune:all", [], invoke_options)
+
+      Kamal::Commands::Hook.any_instance.stubs(:hook_exists?).returns(true)
+
+      run_command("deploy", "--verbose", config_file: "deploy_with_local_registry").tap do |output|
+        assert_hook_ran "pre-connect", output
+        assert_match /Build and push app image/, output
+        assert_hook_ran "pre-deploy", output
+        assert_match /Ensure kamal-proxy is running/, output
+        assert_match /Detect stale containers/, output
+        assert_match /Prune old containers and images/, output
+        assert_hook_ran "post-deploy", output
+      end
+    end
+  end
+
+  test "setup with no_cache" do
+    invoke_options = base_invoke_options(no_cache: true)
+
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:server:bootstrap", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:accessory:boot", [ "all" ], invoke_options)
+    # deploy
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:deliver", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:boot", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true))
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:boot", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:prune:all", [], invoke_options)
+
+    run_command("setup", "--no-cache").tap do |output|
+      assert_match /Ensure Docker is installed.../, output
+      # deploy
+      assert_match /Build and push app image/, output
+      assert_match /Ensure kamal-proxy is running/, output
+      assert_match /Detect stale containers/, output
+      assert_match /Prune old containers and images/, output
+    end
+  end
+
   test "deploy" do
     with_test_secrets("secrets" => "DB_PASSWORD=secret") do
-      invoke_options = { "config_file" => "test/fixtures/deploy_simple.yml", "version" => "999", "skip_hooks" => false, "verbose" => true }
+      invoke_options = base_invoke_options(verbose: true)
 
       Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:deliver", [], invoke_options)
       Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:boot", [], invoke_options)
@@ -64,7 +110,7 @@ class CliMainTest < CliTestCase
   end
 
   test "deploy with skip_push" do
-    invoke_options = { "config_file" => "test/fixtures/deploy_simple.yml", "version" => "999", "skip_hooks" => false }
+    invoke_options = base_invoke_options
 
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:pull", [], invoke_options)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:boot", [], invoke_options)
@@ -79,6 +125,23 @@ class CliMainTest < CliTestCase
       assert_match /Detect stale containers/, output
       assert_match /Prune old containers and images/, output
       assert_match /Releasing the deploy lock/, output
+    end
+  end
+
+  test "deploy with no_cache" do
+    invoke_options = base_invoke_options(no_cache: true)
+
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:deliver", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:boot", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true))
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:boot", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:prune:all", [], invoke_options)
+
+    run_command("deploy", "--no-cache").tap do |output|
+      assert_match /Build and push app image/, output
+      assert_match /Ensure kamal-proxy is running/, output
+      assert_match /Detect stale containers/, output
+      assert_match /Prune old containers and images/, output
     end
   end
 
@@ -116,10 +179,122 @@ class CliMainTest < CliTestCase
     end
   end
 
+  test "deploy with --lock-wait retries and acquires lock when freed" do
+    Thread.report_on_exception = false
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:execute)
+    Dir.stubs(:chdir)
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:execute)
+      .with { |*args| args == [ :mkdir, "-p", ".kamal/apps/app" ] }
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:execute)
+      .with { |*arg| arg[0..1] == [ :mkdir, ".kamal/lock-app" ] }
+      .raises(RuntimeError, "mkdir: cannot create directory ‘kamal/lock-app’: File exists").then
+      .raises(RuntimeError, "mkdir: cannot create directory ‘kamal/lock-app’: File exists").then
+      .returns(nil)
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture_with_debug)
+      .with(:stat, ".kamal/lock-app", ">", "/dev/null", "&&", :cat, ".kamal/lock-app/details", "|", :base64, "-d")
+      .returns("Locked by: alice\nVersion: 999\nMessage: Automatic deploy lock")
+
+    Kamal::Cli::Base.any_instance.stubs(:sleep)
+
+    Kamal::Cli::Main.any_instance.stubs(:invoke)
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture_with_info)
+      .with(:git, "-C", anything, :"rev-parse", :HEAD)
+      .returns(Kamal::Git.revision)
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture_with_info)
+      .with(:git, "-C", anything, :status, "--porcelain")
+      .returns("")
+
+    output = run_command("deploy", "--lock-wait", "--lock-wait-interval", "0", "--lock-wait-timeout", "60")
+    assert_match /Acquiring the deploy lock \(waiting up to 60s\)/, output
+    assert_match /Deploy lock is held by:/, output
+    assert_match /Retrying in 0s/, output
+    assert_match /Releasing the deploy lock/, output
+  end
+
+  test "deploy with --lock-wait times out" do
+    Thread.report_on_exception = false
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:execute)
+    Dir.stubs(:chdir)
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:execute)
+      .with { |*args| args == [ :mkdir, "-p", ".kamal/apps/app" ] }
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:execute)
+      .with { |*arg| arg[0..1] == [ :mkdir, ".kamal/lock-app" ] }
+      .raises(RuntimeError, "mkdir: cannot create directory ‘kamal/lock-app’: File exists")
+
+    SSHKit::Backend::Abstract.any_instance.expects(:capture_with_debug)
+      .with(:stat, ".kamal/lock-app", ">", "/dev/null", "&&", :cat, ".kamal/lock-app/details", "|", :base64, "-d")
+      .returns("Locked by: alice\nVersion: 999\nMessage: Automatic deploy lock")
+
+    Kamal::Cli::Base.any_instance.stubs(:sleep)
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture_with_info)
+      .with(:git, "-C", anything, :"rev-parse", :HEAD)
+      .returns(Kamal::Git.revision)
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture_with_info)
+      .with(:git, "-C", anything, :status, "--porcelain")
+      .returns("")
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture_with_info)
+      .with(:docker, :info, "--format '{{index .RegistryConfig.Mirrors 0}}'")
+      .returns("")
+
+    assert_raises(Kamal::Cli::LockError) do
+      run_command("deploy", "--lock-wait", "--lock-wait-timeout", "0", "--lock-wait-interval", "0")
+    end
+  end
+
+  test "deploy with --lock-wait fails immediately when the lock is held manually" do
+    Thread.report_on_exception = false
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:execute)
+    Dir.stubs(:chdir)
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:execute)
+      .with { |*args| args == [ :mkdir, "-p", ".kamal/apps/app" ] }
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:execute)
+      .with { |*arg| arg[0..1] == [ :mkdir, ".kamal/lock-app" ] }
+      .raises(RuntimeError, "mkdir: cannot create directory ‘kamal/lock-app’: File exists")
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture_with_debug)
+      .with(:stat, ".kamal/lock-app", ">", "/dev/null", "&&", :cat, ".kamal/lock-app/details", "|", :base64, "-d")
+      .returns("Locked by: alice\nVersion: 999\nMessage: Stopping deploys for maintenance")
+
+    # A manually held lock must never trigger a wait, even with a long timeout
+    Kamal::Cli::Base.any_instance.expects(:sleep).never
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture_with_info)
+      .with(:git, "-C", anything, :"rev-parse", :HEAD)
+      .returns(Kamal::Git.revision)
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture_with_info)
+      .with(:git, "-C", anything, :status, "--porcelain")
+      .returns("")
+
+    SSHKit::Backend::Abstract.any_instance.stubs(:capture_with_info)
+      .with(:docker, :info, "--format '{{index .RegistryConfig.Mirrors 0}}'")
+      .returns("")
+
+    error = assert_raises(Kamal::Cli::LockError) do
+      run_command("deploy", "--lock-wait", "--lock-wait-timeout", "60", "--lock-wait-interval", "0")
+    end
+    assert_match /held manually/, error.message
+  end
+
   test "deploy when inheriting lock" do
     Thread.report_on_exception = false
 
-    invoke_options = { "config_file" => "test/fixtures/deploy_simple.yml", "version" => "999", "skip_hooks" => false }
+    invoke_options = base_invoke_options
 
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:deliver", [], invoke_options)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:boot", [], invoke_options)
@@ -174,7 +349,7 @@ class CliMainTest < CliTestCase
   end
 
   test "deploy errors during outside section leave remote lock" do
-    invoke_options = { "config_file" => "test/fixtures/deploy_simple.yml", "version" => "999", "skip_hooks" => false }
+    invoke_options = base_invoke_options
 
     Kamal::Cli::Main.any_instance.expects(:invoke)
       .with("kamal:cli:build:deliver", [], invoke_options)
@@ -188,7 +363,7 @@ class CliMainTest < CliTestCase
   end
 
   test "deploy with skipped hooks" do
-    invoke_options = { "config_file" => "test/fixtures/deploy_simple.yml", "version" => "999", "skip_hooks" => true }
+    invoke_options = base_invoke_options(skip_hooks: true)
 
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:deliver", [], invoke_options)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:boot", [], invoke_options)
@@ -202,7 +377,7 @@ class CliMainTest < CliTestCase
   end
 
   test "deploy with missing secrets" do
-    invoke_options = { "config_file" => "test/fixtures/deploy_with_secrets.yml", "version" => "999", "skip_hooks" => false }
+    invoke_options = base_invoke_options(config_file: "deploy_with_secrets.yml")
 
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:deliver", [], invoke_options)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:boot", [], invoke_options)
@@ -214,7 +389,7 @@ class CliMainTest < CliTestCase
   end
 
   test "redeploy" do
-    invoke_options = { "config_file" => "test/fixtures/deploy_simple.yml", "version" => "999", "skip_hooks" => false, "verbose" => true }
+    invoke_options = base_invoke_options(verbose: true)
 
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:deliver", [], invoke_options)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true))
@@ -226,13 +401,13 @@ class CliMainTest < CliTestCase
       assert_hook_ran "pre-connect", output
       assert_match /Build and push app image/, output
       assert_hook_ran "pre-deploy", output
-      assert_match /Running the pre-deploy hook.../, output
+      assert_match /Running \/usr\/bin\/env .kamal\/hooks\/pre-deploy /, output
       assert_hook_ran "post-deploy", output
     end
   end
 
   test "redeploy with skip_push" do
-    invoke_options = { "config_file" => "test/fixtures/deploy_simple.yml", "version" => "999", "skip_hooks" => false }
+    invoke_options = base_invoke_options
 
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:pull", [], invoke_options)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true))
@@ -243,13 +418,25 @@ class CliMainTest < CliTestCase
     end
   end
 
+  test "redeploy with no_cache" do
+    invoke_options = base_invoke_options(no_cache: true)
+
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:deliver", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true))
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:boot", [], invoke_options)
+
+    run_command("redeploy", "--no-cache").tap do |output|
+      assert_match /Build and push app image/, output
+    end
+  end
+
   test "rollback bad version" do
     Thread.report_on_exception = false
 
     run_command("details") # Preheat Kamal const
 
     run_command("rollback", "nonsense").tap do |output|
-      assert_match /docker container ls --all --filter name=\^app-web-nonsense\$ --quiet/, output
+      assert_match /docker container ls --all --filter 'name=\^app-web-nonsense\$' --quiet/, output
       assert_match /The app version 'nonsense' is not available as a container/, output
     end
   end
@@ -258,10 +445,10 @@ class CliMainTest < CliTestCase
     Object.any_instance.stubs(:sleep)
     [ "web", "workers" ].each do |role|
       SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
-        .with(:docker, :container, :ls, "--all", "--filter", "name=^app-#{role}-123$", "--quiet", raise_on_non_zero_exit: false)
+        .with(:docker, :container, :ls, "--all", "--filter", "'name=^app-#{role}-123$'", "--quiet", raise_on_non_zero_exit: false)
         .returns("").at_least_once
       SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
-        .with(:docker, :container, :ls, "--all", "--filter", "name=^app-#{role}-123$", "--quiet")
+        .with(:docker, :container, :ls, "--all", "--filter", "'name=^app-#{role}-123$'", "--quiet")
         .returns("version-to-rollback\n").at_least_once
       SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
         .with(:sh, "-c", "'docker ps --latest --format '\\''{{.Names}}'\\'' --filter label=service=app --filter label=destination= --filter label=role=#{role} --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''{{.ID}}'\\'') ; docker ps --latest --format '\\''{{.Names}}'\\'' --filter label=service=app --filter label=destination= --filter label=role=#{role} --filter status=running --filter status=restarting'", "|", :head, "-1", "|", "while read line; do echo ${line#app-#{role}-}; done", raise_on_non_zero_exit: false)
@@ -269,7 +456,7 @@ class CliMainTest < CliTestCase
     end
 
     SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
-      .with(:docker, :container, :ls, "--all", "--filter", "name=^app-workers-123$", "--quiet", "|", :xargs, :docker, :inspect, "--format", "'{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'")
+      .with(:docker, :container, :ls, "--all", "--filter", "'name=^app-workers-123$'", "--quiet", "|", :xargs, :docker, :inspect, "--format", "'{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'")
       .returns("running").at_least_once # health check
 
     Kamal::Commands::Hook.any_instance.stubs(:hook_exists?).returns(true)
@@ -278,7 +465,7 @@ class CliMainTest < CliTestCase
       assert_hook_ran "pre-deploy", output
       assert_match "docker tag dhh/app:123 dhh/app:latest", output
       assert_match "docker run --detach --restart unless-stopped --name app-web-123", output
-      assert_match "docker container ls --all --filter name=^app-web-version-to-rollback$ --quiet | xargs docker stop", output, "Should stop the container that was previously running"
+      assert_match "docker container ls --all --filter 'name=^app-web-version-to-rollback$' --quiet | xargs docker stop", output, "Should stop the container that was previously running"
       assert_hook_ran "post-deploy", output
     end
   end
@@ -287,10 +474,10 @@ class CliMainTest < CliTestCase
     Kamal::Cli::Main.any_instance.stubs(:container_available?).returns(true)
 
     SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
-      .with(:docker, :container, :ls, "--all", "--filter", "name=^app-web-123$", "--quiet", raise_on_non_zero_exit: false)
+      .with(:docker, :container, :ls, "--all", "--filter", "'name=^app-web-123$'", "--quiet", raise_on_non_zero_exit: false)
       .returns("").at_least_once
     SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
-      .with(:docker, :container, :ls, "--all", "--filter", "name=^app-web-123$", "--quiet")
+      .with(:docker, :container, :ls, "--all", "--filter", "'name=^app-web-123$'", "--quiet")
       .returns("123").at_least_once
     SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
       .with(:sh, "-c", "'docker ps --latest --format '\\''{{.Names}}'\\'' --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting --filter ancestor=$(docker image ls --filter reference=dhh/app:latest --format '\\''{{.ID}}'\\'') ; docker ps --latest --format '\\''{{.Names}}'\\'' --filter label=service=app --filter label=destination= --filter label=role=web --filter status=running --filter status=restarting'", "|", :head, "-1", "|", "while read line; do echo ${line#app-web-}; done", raise_on_non_zero_exit: false)
@@ -300,6 +487,16 @@ class CliMainTest < CliTestCase
       assert_match "docker run --detach --restart unless-stopped --name app-web-123", output
       assert_no_match "docker stop", output
     end
+  end
+
+  test "remove" do
+    options = base_invoke_options(version: nil, confirmed: true)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:remove", [], options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:remove", [], options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:accessory:remove", [ "all" ], options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:registry:remove", [], options.merge(skip_local: true))
+
+    run_command("remove", "-y")
   end
 
   test "details" do
@@ -363,6 +560,78 @@ class CliMainTest < CliTestCase
       assert_equal "registry.digitalocean.com/dhh/app", config[:repository]
       assert_equal "registry.digitalocean.com/dhh/app:999", config[:absolute_image]
       assert_equal "app-999", config[:service_with_version]
+    end
+  end
+
+  test "config with blank line trimming" do
+    template = <<~YAML
+      service: app
+      image: dhh/app
+      servers:
+        - "1.1.1.1"
+      <% if true -%>
+        - "1.1.1.2"
+      <% end -%>
+      registry:
+        username: user
+        password: pw
+      builder:
+        arch: amd64
+    YAML
+
+    expected_rendered = ERB.new(template, trim_mode: "-").result
+
+    Dir.mktmpdir do |dir|
+      config_path = File.join(dir, "deploy.yml")
+      File.write(config_path, template)
+
+      load_method = YAML.respond_to?(:unsafe_load) ? :unsafe_load : :load
+      original_load = YAML.method(load_method)
+
+      YAML.expects(load_method).with(expected_rendered).returns(original_load.call(expected_rendered))
+
+      run_command_with_config_path("config", config_path: config_path)
+    end
+  end
+
+  test "config with destination blank line trimming" do
+    base_template = <<~YAML
+      service: app
+      image: dhh/app
+      servers:
+        - "1.1.1.1"
+      registry:
+        username: user
+        password: pw
+      builder:
+        arch: amd64
+    YAML
+
+    destination_template = <<~YAML
+      servers:
+        - "2.2.2.2"
+      <% if true -%>
+        - "2.2.2.3"
+      <% end -%>
+    YAML
+
+    expected_destination = ERB.new(destination_template, trim_mode: "-").result
+
+    Dir.mktmpdir do |dir|
+      base_path = File.join(dir, "deploy.yml")
+      File.write(base_path, base_template)
+
+      destination_path = File.join(dir, "deploy.world.yml")
+      File.write(destination_path, destination_template)
+
+      load_method = YAML.respond_to?(:unsafe_load) ? :unsafe_load : :load
+      original_load = YAML.method(load_method)
+      load_sequence = sequence("config_files")
+
+      YAML.expects(load_method).with(base_template).in_sequence(load_sequence).returns(original_load.call(base_template))
+      YAML.expects(load_method).with(expected_destination).in_sequence(load_sequence).returns(original_load.call(expected_destination))
+
+      run_command_with_config_path("config", config_path: base_path, destination: "world")
     end
   end
 
@@ -520,6 +789,18 @@ class CliMainTest < CliTestCase
     end
   end
 
+  test "run an alias with require_destination" do
+    invoke_options = base_invoke_options(config_file: "deploy_for_required_dest.yml", destination: "world")
+
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:build:deliver", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:boot", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:stale_containers", [], invoke_options.merge(stop: true))
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:app:boot", [], invoke_options)
+    Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:prune:all", [], invoke_options)
+
+    run_command("world_deploy", config_file: "deploy_for_required_dest")
+  end
+
   test "run on primary via alias" do
     run_command("primary_details", config_file: "deploy_with_aliases").tap do |output|
       assert_match "App Host: 1.1.1.1", output
@@ -528,7 +809,7 @@ class CliMainTest < CliTestCase
   end
 
   test "upgrade" do
-    invoke_options = { "config_file" => "test/fixtures/deploy_with_accessories.yml", "skip_hooks" => false, "confirmed" => true, "rolling" => false }
+    invoke_options = base_invoke_options(config_file: "deploy_with_accessories.yml", version: nil, confirmed: true, rolling: false)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:upgrade", [], invoke_options)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:accessory:upgrade", [ "all" ], invoke_options)
 
@@ -539,7 +820,7 @@ class CliMainTest < CliTestCase
   end
 
   test "upgrade rolling" do
-    invoke_options = { "config_file" => "test/fixtures/deploy_with_accessories.yml", "skip_hooks" => false, "confirmed" => true, "rolling" => false }
+    invoke_options = base_invoke_options(config_file: "deploy_with_accessories.yml", version: nil, confirmed: true, rolling: false)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:proxy:upgrade", [], invoke_options).times(4)
     Kamal::Cli::Main.any_instance.expects(:invoke).with("kamal:cli:accessory:upgrade", [ "all" ], invoke_options).times(3)
 
@@ -562,10 +843,20 @@ class CliMainTest < CliTestCase
       end
     end
 
+    def run_command_with_config_path(*command, config_path:, destination: nil)
+      argv = [ *command ]
+      argv += [ "-d", destination ] if destination
+      argv += [ "-c", config_path ]
+
+      with_argv([ *argv ]) do
+        stdouted { Kamal::Cli::Main.start }
+      end
+    end
+
     def in_dummy_git_repo
       Dir.mktmpdir do |tmpdir|
         Dir.chdir(tmpdir) do
-          `git init`
+          `git init -q -b main`
           yield
         end
       end
@@ -594,5 +885,17 @@ class CliMainTest < CliTestCase
       yield
     ensure
       ENV.delete("KAMAL_LOCK")
+    end
+
+    def base_invoke_options(config_file: "deploy_simple.yml", version: "999", **extras)
+      base = {
+        "config_file" => "test/fixtures/#{config_file}",
+        "skip_hooks" => false,
+        "lock_wait" => false,
+        "lock_wait_timeout" => 900,
+        "lock_wait_interval" => 15
+      }
+      base["version"] = version unless version.nil?
+      base.merge(extras.transform_keys(&:to_s))
     end
 end

@@ -1,3 +1,3 @@
 module Kamal
-  VERSION = "2.7.0"
+  VERSION = "2.12.0"
 end

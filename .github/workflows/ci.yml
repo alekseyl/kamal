@@ -5,6 +5,10 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
   rubocop:
     name: RuboCop
@@ -13,14 +17,32 @@ jobs:
       BUNDLE_ONLY: rubocop
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Setup Ruby and install gems
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
         with:
           ruby-version: 3.3.0
           bundler-cache: true
       - name: Run Rubocop
         run: bundle exec rubocop --parallel
+  lint-actions:
+    name: GitHub Actions audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint
+        uses: rhysd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          advanced-security: false
   tests:
     strategy:
       fail-fast: false
@@ -29,26 +51,54 @@ jobs:
           - "3.2"
           - "3.3"
           - "3.4"
+          - "4.0"
         gemfile:
           - Gemfile
           - gemfiles/rails_edge.gemfile
+        exclude:
+          - ruby-version: "3.2"
+            gemfile: gemfiles/rails_edge.gemfile
     name: ${{ format('Tests (Ruby {0})', matrix.ruby-version) }}
     runs-on: ubuntu-latest
     env:
       BUNDLE_GEMFILE: ${{ github.workspace }}/${{ matrix.gemfile }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Remove gemfile.lock
         run: rm Gemfile.lock
 
       - name: Install Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
         with:
           ruby-version: ${{ matrix.ruby-version }}
           bundler-cache: true
+
+      - name: Configure Docker with overlay2 storage driver
+        run: |
+          sudo systemctl stop docker
+          sudo systemctl stop docker.socket
+          sudo mkdir -p /etc/docker /mnt/docker
+          cat <<'EOF' | sudo tee /etc/docker/daemon.json
+          {
+            "storage-driver": "overlay2",
+            "data-root": "/mnt/docker"
+          }
+          EOF
+          sudo rm -rf /var/lib/docker/* /mnt/docker/*
+          sudo systemctl start docker
+          timeout 30 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+          df -h
 
       - name: Run tests
         run: bin/test
         env:
           RUBYOPT: ${{ startsWith(matrix.ruby-version, '3.4.') && '--enable=frozen-string-literal' || '' }}
+
+      - name: Check disk usage
+        if: always()
+        run: |
+          df -h
+          sudo du -sh /mnt/docker

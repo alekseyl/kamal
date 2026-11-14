@@ -26,9 +26,51 @@ class CliBuildTest < CliTestCase
         assert_match /Cloning repo into build directory/, output
         assert_match /git -C #{Dir.tmpdir}\/kamal-clones\/app-#{pwd_sha} clone #{Dir.pwd}/, output
         assert_match /docker --version && docker buildx version/, output
-        assert_match /docker buildx build --output=type=registry --platform linux\/amd64 --builder kamal-local-docker-container -t dhh\/app:999 -t dhh\/app:latest --label service="app" --file Dockerfile \. 2>&1 as .*@localhost/, output
+        assert_match /docker buildx build --output=type=registry --platform linux\/amd64 --builder kamal-local-docker-container-6e208c509c5d -t dhh\/app:999 -t dhh\/app:latest --label service="app" --file Dockerfile \. 2>&1 as .*@localhost/, output
       end
     end
+  end
+
+  test "push with remote builder checks both the builder and the remote context" do
+    with_build_directory do |build_directory|
+      Kamal::Commands::Hook.any_instance.stubs(:hook_exists?).returns(true)
+
+      SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
+        .with(:git, "-C", anything, :"rev-parse", :HEAD)
+        .returns(Kamal::Git.revision)
+
+      SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
+        .with(:git, "-C", anything, :status, "--porcelain")
+        .returns("")
+
+      run_command("push", "--verbose", fixture: :with_remote_builder).tap do |output|
+        assert_no_match "Running docker login -u [REDACTED] -p [REDACTED] as ", output
+        assert_match "docker buildx inspect kamal-remote-ssh---app-1-1-1-5-6e208c509c5d | grep -q Endpoint:.*kamal-remote-ssh---app-1-1-1-5-6e208c509c5d-context && docker context inspect kamal-remote-ssh---app-1-1-1-5-6e208c509c5d-context --format '{{.Endpoints.docker.Host}}' | grep -xq ssh://app@1.1.1.5 || (echo no compatible builder && exit 1)", output
+        assert_match "Command: ( export BUILDKIT_NO_CLIENT_TOKEN=\"1\" ; docker buildx build --output=type=registry --platform linux/#{remote_arch} --builder kamal-remote-ssh---app-1-1-1-5-6e208c509c5d -t dhh/app:999 -t dhh/app:latest --label service=\"app\" --file Dockerfile . 2>&1 )", output
+      end
+    end
+  end
+
+  test "push with remote builder and local registry starts the local registry container" do
+    # Regression test for the combination of `builder.remote` + `registry.server: localhost:...`.
+    # Even though we skip `docker login` locally for remote builders (#1664),
+    # we must still ensure the local registry container is running on the dev
+    # machine, since the remote builder pushes to it through an SSH tunnel.
+    assert_local_registry_started_before_push(
+      fixture: :with_local_registry_and_remote_builder,
+      remote_host: "1.1.1.5"
+    )
+  end
+
+  test "push with hybrid builder and local registry starts the local registry container" do
+    # `Kamal::Commands::Builder::Hybrid` inherits from `Remote`, so it has the
+    # same `login_to_registry_locally? => false` and would suffer from the
+    # same regression as the pure-remote builder when combined with a local
+    # registry.
+    assert_local_registry_started_before_push(
+      fixture: :with_local_registry_and_hybrid_builder,
+      remote_host: "1.1.1.5"
+    )
   end
 
   test "push --output=docker" do
@@ -48,7 +90,7 @@ class CliBuildTest < CliTestCase
         assert_match /Cloning repo into build directory/, output
         assert_match /git -C #{Dir.tmpdir}\/kamal-clones\/app-#{pwd_sha} clone #{Dir.pwd}/, output
         assert_match /docker --version && docker buildx version/, output
-        assert_match /docker buildx build --output=type=docker --platform linux\/amd64 --builder kamal-local-docker-container -t dhh\/app:999 -t dhh\/app:latest --label service="app" --file Dockerfile \. 2>&1 as .*@localhost/, output
+        assert_match /docker buildx build --output=type=docker --platform linux\/amd64 --builder kamal-local-docker-container-6e208c509c5d -t dhh\/app:999 -t dhh\/app:latest --label service="app" --file Dockerfile \. 2>&1 as .*@localhost/, output
       end
     end
   end
@@ -70,9 +112,10 @@ class CliBuildTest < CliTestCase
       SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:git, "-C", build_directory, :reset, "--hard", Kamal::Git.revision)
       SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:git, "-C", build_directory, :clean, "-fdx")
       SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:git, "-C", build_directory, :submodule, :update, "--init")
+      SSHKit::Backend::Abstract.any_instance.expects(:execute).with(:git, "-C", build_directory, :gc, "--auto", "--quiet")
 
       SSHKit::Backend::Abstract.any_instance.expects(:execute)
-        .with(:docker, :buildx, :build, "--output=type=registry", "--platform", "linux/amd64", "--builder", "kamal-local-docker-container", "-t", "dhh/app:999", "-t", "dhh/app:latest", "--label", "service=\"app\"", "--file", "Dockerfile", ".", "2>&1")
+        .with(:docker, :buildx, :build, "--output=type=registry", "--platform", "linux/amd64", "--builder", "kamal-local-docker-container-6e208c509c5d", "-t", "dhh/app:999", "-t", "dhh/app:latest", "--label", "service=\"app\"", "--file", "Dockerfile", ".", "2>&1", env: {})
 
       SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
         .with(:git, "-C", anything, :"rev-parse", :HEAD)
@@ -96,7 +139,17 @@ class CliBuildTest < CliTestCase
       assert_no_match /Cloning repo into build directory/, output
       assert_hook_ran "pre-build", output
       assert_match /docker --version && docker buildx version/, output
-      assert_match /docker buildx build --output=type=registry --platform linux\/amd64 --builder kamal-local-docker-container -t dhh\/app:999 -t dhh\/app:latest --label service="app" --file Dockerfile . 2>&1 as .*@localhost/, output
+      assert_match /docker buildx build --output=type=registry --platform linux\/amd64 --builder kamal-local-docker-container-6e208c509c5d -t dhh\/app:999 -t dhh\/app:latest --label service="app" --file Dockerfile . 2>&1 as .*@localhost/, output
+    end
+  end
+
+  test "push with no-cache" do
+    Kamal::Commands::Hook.any_instance.stubs(:hook_exists?).returns(true)
+
+    run_command("push", "--no-cache", "--verbose", fixture: :without_clone).tap do |output|
+      assert_hook_ran "pre-build", output
+      assert_match /docker --version && docker buildx version/, output
+      assert_match /docker buildx build --output=type=registry --platform linux\/amd64 --builder kamal-local-docker-container-6e208c509c5d -t dhh\/app:999 -t dhh\/app:latest --label service="app" --file Dockerfile --no-cache . 2>&1 as .*@localhost/, output
     end
   end
 
@@ -135,6 +188,48 @@ class CliBuildTest < CliTestCase
     end
   end
 
+  test "push without builder for local registry" do
+    with_build_directory do |build_directory|
+      stub_setup
+
+      SSHKit::Backend::Abstract.any_instance.expects(:execute)
+        .with(:docker, "--version", "&&", :docker, :buildx, "version")
+
+      SSHKit::Backend::Abstract.any_instance.stubs(:execute)
+        .with { |*args| args[0..1] == [ :docker, :login ] }
+
+      SSHKit::Backend::Abstract.any_instance.expects(:execute)
+      .with(:docker, :start, "kamal-docker-registry", "||", :docker, :run, "--detach", "-p", "127.0.0.1:5000:5000", "--name", "kamal-docker-registry", "registry:3")
+
+      SSHKit::Backend::Abstract.any_instance.expects(:execute)
+        .with(:docker, :buildx, :rm, "kamal-local-registry-docker-container-3e4092d0c8b9")
+
+      SSHKit::Backend::Abstract.any_instance.expects(:execute)
+        .with(:docker, :buildx, :create, "--name", "kamal-local-registry-docker-container-3e4092d0c8b9", "--driver=docker-container", "--driver-opt", "network=host")
+
+      SSHKit::Backend::Abstract.any_instance.expects(:execute)
+        .with(:docker, :buildx, :inspect, "kamal-local-registry-docker-container-3e4092d0c8b9")
+        .raises(SSHKit::Command::Failed.new("no builder"))
+
+      SSHKit::Backend::Abstract.any_instance.expects(:execute).with { |*args| args.first.to_s.start_with?("git") }
+
+      SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
+        .with(:git, "-C", anything, :"rev-parse", :HEAD)
+        .returns(Kamal::Git.revision)
+
+      SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
+        .with(:git, "-C", anything, :status, "--porcelain")
+        .returns("")
+
+      SSHKit::Backend::Abstract.any_instance.expects(:execute)
+        .with(:docker, :buildx, :build, "--output=type=registry", "--platform", "linux/amd64", "--builder", "kamal-local-registry-docker-container-3e4092d0c8b9", "-t", "localhost:5000/dhh/app:999", "-t", "localhost:5000/dhh/app:latest", "--label", "service=\"app\"", "--file", "Dockerfile", ".", "2>&1", env: {})
+
+      run_command("push", fixture: :with_local_registry_and_accessories).tap do |output|
+        assert_match /WARN Missing compatible builder, so creating a new one first/, output
+      end
+    end
+  end
+
   test "push without builder" do
     with_build_directory do |build_directory|
       stub_setup
@@ -146,13 +241,13 @@ class CliBuildTest < CliTestCase
         .with { |*args| args[0..1] == [ :docker, :login ] }
 
       SSHKit::Backend::Abstract.any_instance.expects(:execute)
-        .with(:docker, :buildx, :rm, "kamal-local-docker-container")
+        .with(:docker, :buildx, :rm, "kamal-local-docker-container-6e208c509c5d")
 
       SSHKit::Backend::Abstract.any_instance.expects(:execute)
-        .with(:docker, :buildx, :create, "--name", "kamal-local-docker-container", "--driver=docker-container")
+        .with(:docker, :buildx, :create, "--name", "kamal-local-docker-container-6e208c509c5d", "--driver=docker-container")
 
       SSHKit::Backend::Abstract.any_instance.expects(:execute)
-        .with(:docker, :buildx, :inspect, "kamal-local-docker-container")
+        .with(:docker, :buildx, :inspect, "kamal-local-docker-container-6e208c509c5d")
         .raises(SSHKit::Command::Failed.new("no builder"))
 
       SSHKit::Backend::Abstract.any_instance.expects(:execute).with { |*args| args.first.start_with?("git") }
@@ -166,7 +261,7 @@ class CliBuildTest < CliTestCase
         .returns("")
 
       SSHKit::Backend::Abstract.any_instance.expects(:execute)
-        .with(:docker, :buildx, :build, "--output=type=registry", "--platform", "linux/amd64", "--builder", "kamal-local-docker-container", "-t", "dhh/app:999", "-t", "dhh/app:latest", "--label", "service=\"app\"", "--file", "Dockerfile", ".", "2>&1")
+        .with(:docker, :buildx, :build, "--output=type=registry", "--platform", "linux/amd64", "--builder", "kamal-local-docker-container-6e208c509c5d", "-t", "dhh/app:999", "-t", "dhh/app:latest", "--label", "service=\"app\"", "--file", "Dockerfile", ".", "2>&1", env: {})
 
       run_command("push").tap do |output|
         assert_match /WARN Missing compatible builder, so creating a new one first/, output
@@ -232,32 +327,32 @@ class CliBuildTest < CliTestCase
 
   test "create" do
     run_command("create").tap do |output|
-      assert_match /docker buildx create --name kamal-local-docker-container --driver=docker-container/, output
+      assert_match /docker buildx create --name kamal-local-docker-container-6e208c509c5d --driver=docker-container/, output
     end
   end
 
   test "create remote" do
     run_command("create", fixture: :with_remote_builder).tap do |output|
       assert_match "Running /usr/bin/env true on 1.1.1.5", output
-      assert_match "docker context create kamal-remote-ssh---app-1-1-1-5-context --description 'kamal-remote-ssh---app-1-1-1-5 host' --docker 'host=ssh://app@1.1.1.5'", output
-      assert_match "docker buildx create --name kamal-remote-ssh---app-1-1-1-5 kamal-remote-ssh---app-1-1-1-5-context", output
+      assert_match "docker context create kamal-remote-ssh---app-1-1-1-5-6e208c509c5d-context --description 'kamal-remote-ssh---app-1-1-1-5-6e208c509c5d host' --docker 'host=ssh://app@1.1.1.5'", output
+      assert_match "docker buildx create --name kamal-remote-ssh---app-1-1-1-5-6e208c509c5d kamal-remote-ssh---app-1-1-1-5-6e208c509c5d-context", output
     end
   end
 
   test "create remote with custom ports" do
     run_command("create", fixture: :with_remote_builder_and_custom_ports).tap do |output|
       assert_match "Running /usr/bin/env true on 1.1.1.5", output
-      assert_match "docker context create kamal-remote-ssh---app-1-1-1-5-2122-context --description 'kamal-remote-ssh---app-1-1-1-5-2122 host' --docker 'host=ssh://app@1.1.1.5:2122'", output
-      assert_match "docker buildx create --name kamal-remote-ssh---app-1-1-1-5-2122 kamal-remote-ssh---app-1-1-1-5-2122-context", output
+      assert_match "docker context create kamal-remote-ssh---app-1-1-1-5-2122-6e208c509c5d-context --description 'kamal-remote-ssh---app-1-1-1-5-2122-6e208c509c5d host' --docker 'host=ssh://app@1.1.1.5:2122'", output
+      assert_match "docker buildx create --name kamal-remote-ssh---app-1-1-1-5-2122-6e208c509c5d kamal-remote-ssh---app-1-1-1-5-2122-6e208c509c5d-context", output
     end
   end
 
   test "create hybrid" do
     run_command("create", fixture: :with_hybrid_builder).tap do |output|
       assert_match "Running /usr/bin/env true on 1.1.1.5", output
-      assert_match "docker buildx create --platform linux/#{Kamal::Utils.docker_arch} --name kamal-hybrid-docker-container-ssh---app-1-1-1-5 --driver=docker-container", output
-      assert_match "docker context create kamal-hybrid-docker-container-ssh---app-1-1-1-5-context --description 'kamal-hybrid-docker-container-ssh---app-1-1-1-5 host' --docker 'host=ssh://app@1.1.1.5'", output
-      assert_match "docker buildx create --platform linux/#{Kamal::Utils.docker_arch == "amd64" ? "arm64" : "amd64"} --append --name kamal-hybrid-docker-container-ssh---app-1-1-1-5 kamal-hybrid-docker-container-ssh---app-1-1-1-5-context", output
+      assert_match "docker buildx create --platform linux/#{local_arch} --name kamal-hybrid-docker-container-ssh---app-1-1-1-5-6e208c509c5d --driver=docker-container", output
+      assert_match "docker context create kamal-hybrid-docker-container-ssh---app-1-1-1-5-6e208c509c5d-context --description 'kamal-hybrid-docker-container-ssh---app-1-1-1-5-6e208c509c5d host' --docker 'host=ssh://app@1.1.1.5'", output
+      assert_match "docker buildx create --platform linux/#{remote_arch} --append --name kamal-hybrid-docker-container-ssh---app-1-1-1-5-6e208c509c5d kamal-hybrid-docker-container-ssh---app-1-1-1-5-6e208c509c5d-context", output
     end
   end
 
@@ -308,7 +403,7 @@ class CliBuildTest < CliTestCase
       run_command("dev", "--verbose").tap do |output|
         assert_no_match(/Cloning repo into build directory/, output)
         assert_match(/docker --version && docker buildx version/, output)
-        assert_match(/docker buildx build --output=type=docker --platform linux\/amd64 --builder kamal-local-docker-container -t dhh\/app:999-dirty -t dhh\/app:latest-dirty --label service="app" --file Dockerfile \. 2>&1 as .*@localhost/, output)
+        assert_match(/docker buildx build --output=type=docker --platform linux\/amd64 --builder kamal-local-docker-container-6e208c509c5d -t dhh\/app:999-dirty -t dhh\/app:latest-dirty --label service="app" --file Dockerfile \. 2>&1 as .*@localhost/, output)
       end
     end
   end
@@ -320,12 +415,106 @@ class CliBuildTest < CliTestCase
       run_command("dev", "--output=local", "--verbose").tap do |output|
         assert_no_match(/Cloning repo into build directory/, output)
         assert_match(/docker --version && docker buildx version/, output)
-        assert_match(/docker buildx build --output=type=local --platform linux\/amd64 --builder kamal-local-docker-container -t dhh\/app:999-dirty -t dhh\/app:latest-dirty --label service="app" --file Dockerfile \. 2>&1 as .*@localhost/, output)
+        assert_match(/docker buildx build --output=type=local --platform linux\/amd64 --builder kamal-local-docker-container-6e208c509c5d -t dhh\/app:999-dirty -t dhh\/app:latest-dirty --label service="app" --file Dockerfile \. 2>&1 as .*@localhost/, output)
       end
     end
   end
 
+  test "dev with no-cache" do
+    with_build_directory do |build_directory|
+      Kamal::Commands::Hook.any_instance.stubs(:hook_exists?).returns(true)
+
+      run_command("dev", "--no-cache", "--verbose").tap do |output|
+        assert_no_match(/Cloning repo into build directory/, output)
+        assert_match(/docker --version && docker buildx version/, output)
+        assert_match(/docker buildx build --output=type=docker --platform linux\/amd64 --builder kamal-local-docker-container-6e208c509c5d -t dhh\/app:999-dirty -t dhh\/app:latest-dirty --label service="app" --file Dockerfile --no-cache \. 2>&1 as .*@localhost/, output)
+      end
+    end
+  end
+
+  test "create with local registry" do
+    run_command("create", fixture: :with_local_registry).tap do |output|
+      assert_match /docker buildx create --name kamal-local-registry-docker-container-3e4092d0c8b9 --driver=docker-container --driver-opt network=host/, output
+    end
+  end
+
+  test "create with local registry and remote builder" do
+    run_command("create", fixture: :with_local_registry_and_remote_builder).tap do |output|
+      # Verify remote builder with local-registry in name
+      assert_match /docker buildx create --name kamal-remote-ssh---app-1-1-1-5-local-registry-3e4092d0c8b9/, output
+      assert_match /--driver-opt network=host/, output
+    end
+  end
+
+  test "pull with local registry" do
+    # Verify port forwarding is established for all app hosts
+    port_forwarding_mock = mock("port_forwarding")
+    port_forwarding_mock.expects(:forward).yields
+    Kamal::Cli::Build::PortForwarding.expects(:new)
+      .with([ "1.1.1.1", "1.1.1.2" ], 5000, has_entries(
+        user: "root",
+        port: 22,
+        logger: instance_of(Logger),
+        keepalive: true,
+        keepalive_interval: 30
+      )
+    ).returns(port_forwarding_mock)
+
+    run_command("pull", fixture: :with_local_registry).tap do |output|
+      assert_match /docker pull localhost:5000\/dhh\/app:999/, output
+    end
+  end
+
+  test "create with local registry and remote builder with custom port" do
+    run_command("create", fixture: :with_local_registry_and_remote_builder_with_port).tap do |output|
+      # Verify remote builder with local-registry in name includes custom port in context name
+      assert_match /docker buildx create --name kamal-remote-ssh---app-1-1-1-5-2222-local-registry-3e4092d0c8b9/, output
+      assert_match /--driver-opt network=host/, output
+    end
+  end
+
   private
+    def assert_local_registry_started_before_push(fixture:, remote_host:)
+      with_build_directory do |build_directory|
+        Kamal::Commands::Hook.any_instance.stubs(:hook_exists?).returns(true)
+
+        # Stub the SSH reverse tunnel set up for the remote builder so the
+        # test doesn't try to actually connect to the remote host.
+        port_forwarding_mock = mock("port_forwarding")
+        port_forwarding_mock.expects(:forward).yields
+        Kamal::Cli::Build::PortForwarding.expects(:new)
+          .with([ remote_host ], 5000, has_entries(keepalive: true, keepalive_interval: 30))
+          .returns(port_forwarding_mock)
+
+        SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
+          .with(:git, "-C", anything, :"rev-parse", :HEAD)
+          .returns(Kamal::Git.revision)
+
+        SSHKit::Backend::Abstract.any_instance.expects(:capture_with_info)
+          .with(:git, "-C", anything, :status, "--porcelain")
+          .returns("")
+
+        output = run_command("push", "--verbose", fixture: fixture)
+
+        registry_setup = "docker start kamal-docker-registry || docker run --detach -p 127.0.0.1:5000:5000 --name kamal-docker-registry registry:3"
+        buildx_build   = "docker buildx build"
+
+        # The local registry container is started (or restarted) on the dev machine.
+        assert_match registry_setup, output
+
+        # And it must happen *before* the build/push, otherwise the remote
+        # builder will try to push to a registry that isn't up yet.
+        assert_operator output.index(registry_setup), :<, output.index(buildx_build),
+          "Expected `#{registry_setup}` to run before `#{buildx_build}`"
+
+        # `docker login` is NOT run locally for a local registry (#1664 behavior preserved).
+        assert_no_match "Running docker login -u [REDACTED] -p [REDACTED] as ", output
+
+        # And the remote builder push still happens with BUILDKIT_NO_CLIENT_TOKEN.
+        assert_match "BUILDKIT_NO_CLIENT_TOKEN=\"1\"", output
+      end
+    end
+
     def run_command(*command, fixture: :with_accessories)
       stdouted { stderred { Kamal::Cli::Build.start([ *command, "-c", "test/fixtures/deploy_#{fixture}.yml" ]) } }
     end

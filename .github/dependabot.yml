@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 10
+
+  - package-ecosystem: bundler
+    directory: "/"
+    groups:
+      bundler:
+        patterns:
+          - "*"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 10

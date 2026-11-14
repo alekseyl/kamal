@@ -9,7 +9,7 @@ class CommandsBuilderTest < ActiveSupport::TestCase
     builder = new_builder_command(builder: { "cache" => { "type" => "gha" } })
     assert_equal "local", builder.name
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
       builder.push.join(" ")
   end
 
@@ -17,7 +17,7 @@ class CommandsBuilderTest < ActiveSupport::TestCase
     builder = new_builder_command(builder: { "arch" => [ "amd64" ] })
     assert_equal "local", builder.name
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile . 2>&1",
       builder.push.join(" ")
   end
 
@@ -25,7 +25,7 @@ class CommandsBuilderTest < ActiveSupport::TestCase
     builder = new_builder_command(builder: { "cache" => { "type" => "gha" } })
     assert_equal "local", builder.name
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
       builder.push.join(" ")
   end
 
@@ -33,7 +33,7 @@ class CommandsBuilderTest < ActiveSupport::TestCase
     builder = new_builder_command(builder: { "arch" => [ "amd64", "arm64" ], "remote" => "ssh://app@127.0.0.1", "cache" => { "type" => "gha" } })
     assert_equal "hybrid", builder.name
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64,linux/arm64 --builder kamal-hybrid-docker-container-ssh---app-127-0-0-1 -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64,linux/arm64 --builder kamal-hybrid-docker-container-ssh---app-127-0-0-1-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
       builder.push.join(" ")
   end
 
@@ -41,7 +41,7 @@ class CommandsBuilderTest < ActiveSupport::TestCase
     builder = new_builder_command(builder: { "arch" => [ "amd64", "arm64" ], "remote" => "ssh://app@127.0.0.1", "cache" => { "type" => "gha" }, "local" => false })
     assert_equal "remote", builder.name
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64,linux/arm64 --builder kamal-remote-ssh---app-127-0-0-1 -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64,linux/arm64 --builder kamal-remote-ssh---app-127-0-0-1-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
       builder.push.join(" ")
   end
 
@@ -49,7 +49,7 @@ class CommandsBuilderTest < ActiveSupport::TestCase
     builder = new_builder_command(builder: { "arch" => [ "#{remote_arch}" ], "remote" => "ssh://app@host", "cache" => { "type" => "gha" } })
     assert_equal "remote", builder.name
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/#{remote_arch} --builder kamal-remote-ssh---app-host -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/#{remote_arch} --builder kamal-remote-ssh---app-host-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
       builder.push.join(" ")
   end
 
@@ -57,7 +57,7 @@ class CommandsBuilderTest < ActiveSupport::TestCase
     builder = new_builder_command(builder: { "arch" => [ "#{local_arch}" ], "remote" => "ssh://app@host", "cache" => { "type" => "gha" } })
     assert_equal "local", builder.name
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/#{local_arch} --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/#{local_arch} --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --cache-to type=gha --cache-from type=gha --label service=\"app\" --file Dockerfile . 2>&1",
       builder.push.join(" ")
   end
 
@@ -75,6 +75,14 @@ class CommandsBuilderTest < ActiveSupport::TestCase
     assert_equal \
       "pack build dhh/app --platform linux/amd64 --creation-time now --builder heroku/builder:24 --buildpack heroku/ruby --buildpack heroku/procfile --buildpack paketo-buildpacks/image-labels -t dhh/app:123 -t dhh/app:latest --env BP_IMAGE_LABELS=service=app --env a=\"1\" --env b=\"2\" --path . && docker push dhh/app:123 && docker push dhh/app:latest",
     builder.push.join(" ")
+  end
+
+  test "pack build with no cache" do
+    builder = new_builder_command(image: "dhh/app", builder: { "args" => { "a" => 1, "b" => 2 }, "arch" => "amd64", "pack" => { "builder" => "heroku/builder:24", "buildpacks" => [ "heroku/ruby", "heroku/procfile" ] } })
+
+    assert_equal \
+      "pack build dhh/app --platform linux/amd64 --creation-time now --builder heroku/builder:24 --buildpack heroku/ruby --buildpack heroku/procfile --buildpack paketo-buildpacks/image-labels -t dhh/app:123 -t dhh/app:latest --clear-cache --env BP_IMAGE_LABELS=service=app --env a=\"1\" --env b=\"2\" --path . && docker push dhh/app:123 && docker push dhh/app:latest",
+    builder.push("registry", no_cache: true).join(" ")
   end
 
   test "pack build secrets as env" do
@@ -138,14 +146,14 @@ class CommandsBuilderTest < ActiveSupport::TestCase
   test "build context" do
     builder = new_builder_command(builder: { "context" => ".." })
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile .. 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile .. 2>&1",
       builder.push.join(" ")
   end
 
   test "push with build args" do
     builder = new_builder_command(builder: { "args" => { "a" => 1, "b" => 2 } })
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --build-arg a=\"1\" --build-arg b=\"2\" --file Dockerfile . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --build-arg a=\"1\" --build-arg b=\"2\" --file Dockerfile . 2>&1",
       builder.push.join(" ")
   end
 
@@ -154,7 +162,7 @@ class CommandsBuilderTest < ActiveSupport::TestCase
       FileUtils.touch("Dockerfile")
       builder = new_builder_command(builder: { "secrets" => [ "a", "b" ] })
       assert_equal \
-        "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --secret id=\"a\" --secret id=\"b\" --file Dockerfile . 2>&1",
+        "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --secret id=\"a\" --secret id=\"b\" --file Dockerfile . 2>&1",
         builder.push.join(" ")
     end
   end
@@ -174,41 +182,48 @@ class CommandsBuilderTest < ActiveSupport::TestCase
   test "context build" do
     builder = new_builder_command(builder: { "context" => "./foo" })
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile ./foo 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile ./foo 2>&1",
       builder.push.join(" ")
   end
 
   test "push with provenance" do
     builder = new_builder_command(builder: { "provenance" => "mode=max" })
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile --provenance mode=max . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile --provenance mode=max . 2>&1",
       builder.push.join(" ")
   end
 
   test "push with provenance false" do
     builder = new_builder_command(builder: { "provenance" => false })
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile --provenance false . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile --provenance false . 2>&1",
       builder.push.join(" ")
   end
 
   test "push with sbom" do
     builder = new_builder_command(builder: { "sbom" => true })
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile --sbom true . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile --sbom true . 2>&1",
       builder.push.join(" ")
   end
 
   test "push with sbom false" do
     builder = new_builder_command(builder: { "sbom" => false })
     assert_equal \
-      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile --sbom false . 2>&1",
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile --sbom false . 2>&1",
       builder.push.join(" ")
   end
 
   test "mirror count" do
     command = new_builder_command
     assert_equal "docker info --format '{{index .RegistryConfig.Mirrors 0}}'", command.first_mirror.join(" ")
+  end
+
+  test "push with no cache" do
+    builder = new_builder_command
+    assert_equal \
+      "docker buildx build --output=type=registry --platform linux/amd64 --builder kamal-local-docker-container-f005c512b8b0 -t dhh/app:123 -t dhh/app:latest --label service=\"app\" --file Dockerfile --no-cache . 2>&1",
+      builder.push("registry", no_cache: true).join(" ")
   end
 
   test "clone path with spaces" do
@@ -226,16 +241,74 @@ class CommandsBuilderTest < ActiveSupport::TestCase
     end
   end
 
+  test "clone reset runs git gc --auto to bound pack growth" do
+    command = new_builder_command
+    clone_reset_commands = command.clone_reset_steps.map { |a| a.join(" ") }
+
+    assert clone_reset_commands.any? { |c| c.end_with?(" gc --auto --quiet") },
+      "expected clone_reset_steps to run git gc --auto, got: #{clone_reset_commands.inspect}"
+  end
+
+  test "local builder with local registry includes network host driver option" do
+    builder = new_builder_command(registry: { "server" => "localhost:5000" })
+    assert_equal "local", builder.name
+    assert_equal \
+      "docker buildx create --name kamal-local-registry-docker-container-73efb98bf89f --driver=docker-container --driver-opt network=host",
+      builder.create.join(" ")
+  end
+
+  test "remote builder with local registry" do
+    builder = new_builder_command(
+      registry: { "server" => "localhost:5000" },
+      builder: { "arch" => remote_arch, "remote" => "ssh://app@1.1.1.5" }
+    )
+    assert_equal "remote", builder.name
+    assert_equal \
+      "docker context create kamal-remote-ssh---app-1-1-1-5-local-registry-73efb98bf89f-context --description 'kamal-remote-ssh---app-1-1-1-5-local-registry-73efb98bf89f host' --docker 'host=ssh://app@1.1.1.5' ; docker buildx create --name kamal-remote-ssh---app-1-1-1-5-local-registry-73efb98bf89f --driver-opt network=host kamal-remote-ssh---app-1-1-1-5-local-registry-73efb98bf89f-context",
+      builder.create.join(" ")
+  end
+
+  test "hybrid builder with local registry" do
+    builder = new_builder_command(
+      registry: { "server" => "localhost:5000" },
+      builder: { "arch" => [ "amd64", "arm64" ], "remote" => "ssh://app@1.1.1.5" }
+    )
+    assert_equal "hybrid", builder.name
+    assert_equal \
+      "docker buildx create --platform linux/#{local_arch} --name kamal-hybrid-docker-container-ssh---app-1-1-1-5-local-registry-73efb98bf89f --driver=docker-container --driver-opt network=host && docker context create kamal-hybrid-docker-container-ssh---app-1-1-1-5-local-registry-73efb98bf89f-context --description 'kamal-hybrid-docker-container-ssh---app-1-1-1-5-local-registry-73efb98bf89f host' --docker 'host=ssh://app@1.1.1.5' && docker buildx create --platform linux/#{remote_arch} --append --name kamal-hybrid-docker-container-ssh---app-1-1-1-5-local-registry-73efb98bf89f --driver-opt network=host kamal-hybrid-docker-container-ssh---app-1-1-1-5-local-registry-73efb98bf89f-context",
+      builder.create.join(" ")
+  end
+
+  test "a new registry username gets its own builder" do
+    assert_not_equal \
+      new_builder_command(registry: { "username" => "alice" }).target.send(:builder_name),
+      new_builder_command(registry: { "username" => "bob" }).target.send(:builder_name)
+  end
+
+  test "a new registry server gets its own builder" do
+    assert_not_equal \
+      new_builder_command(registry: { "server" => "ghcr.io" }).target.send(:builder_name),
+      new_builder_command(registry: { "server" => "registry.example.com" }).target.send(:builder_name)
+  end
+
+  test "implicit and explicit Docker Hub share a builder" do
+    assert_equal \
+      new_builder_command.target.send(:builder_name),
+      new_builder_command(registry: { "server" => "docker.io" }).target.send(:builder_name)
+  end
+
+  test "two services on the same registry account share a builder" do
+    assert_equal \
+      new_builder_command(service: "app").target.send(:builder_name),
+      new_builder_command(service: "other", image: "dhh/other").target.send(:builder_name)
+  end
+
   private
     def new_builder_command(additional_config = {})
-      Kamal::Commands::Builder.new(Kamal::Configuration.new(@config.deep_merge(additional_config), version: "123"))
-    end
-
-    def local_arch
-      Kamal::Utils.docker_arch
-    end
-
-    def remote_arch
-      Kamal::Utils.docker_arch == "arm64" ? "amd64" : "arm64"
+      Kamal::Configuration.new(@config.deep_merge(additional_config), version: "123").then do |config|
+        KAMAL.reset
+        KAMAL.stubs(:config).returns(config)
+        Kamal::Commands::Builder.new(config)
+      end
     end
 end

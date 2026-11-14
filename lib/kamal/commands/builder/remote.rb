@@ -19,18 +19,30 @@ class Kamal::Commands::Builder::Remote < Kamal::Commands::Builder::Base
 
   def inspect_builder
     combine \
-      combine inspect_buildx, inspect_remote_context,
+      combine(inspect_buildx, inspect_remote_context),
       [ "(echo no compatible builder && exit 1)" ],
       by: "||"
   end
 
+  def login_to_registry_locally?
+    false
+  end
+
+  def push_env
+    { "BUILDKIT_NO_CLIENT_TOKEN" => "1" }
+  end
+
   private
     def builder_name
-      "kamal-remote-#{remote.gsub(/[^a-z0-9_-]/, "-")}"
+      "kamal-remote-#{remote_builder_name_suffix}-#{registry_digest}"
     end
 
     def remote_context_name
       "#{builder_name}-context"
+    end
+
+    def remote_builder_name_suffix
+      "#{remote.gsub(/[^a-z0-9_-]/, "-")}#{registry_config.local? ? "-local-registry" : "" }"
     end
 
     def inspect_buildx
@@ -54,7 +66,7 @@ class Kamal::Commands::Builder::Remote < Kamal::Commands::Builder::Base
     end
 
     def create_buildx
-      docker :buildx, :create, "--name", builder_name, remote_context_name
+      docker :buildx, :create, "--name", builder_name, *driver_options, remote_context_name
     end
 
     def remove_buildx

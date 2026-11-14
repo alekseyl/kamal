@@ -16,11 +16,19 @@ builder:
   arch: <%= Kamal::Utils.docker_arch %>
   args:
     COMMIT_SHA: <%= `git rev-parse HEAD` %>
+proxy:
+  run:
+    publish: false
+    options:
+      label:
+        - traefik.http.services.kamal_proxy.loadbalancer.server.scheme=http
+        - traefik.http.routers.kamal_proxy.rule=PathPrefix(`/`)
+      sysctl: net.ipv4.ip_local_port_range=10000 60999
 accessories:
   traefik:
     service: traefik
-    image: traefik:v2.10
-    port: 80
+    image: traefik:v3.6
+    port: "0.0.0.0:80:80"
     cmd: "--providers.docker"
     options:
       volume:

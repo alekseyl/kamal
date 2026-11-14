@@ -29,11 +29,17 @@ class Kamal::Configuration::Validator
               end
             elsif key.to_s == "ssl"
                 validate_type! value, TrueClass, FalseClass, Hash
+            elsif key.to_s == "hooks_output"
+                validate_hooks_output!(value)
             elsif key == "hosts"
               validate_servers! value
             elsif example_value.is_a?(Array)
               if key == "arch"
                 validate_array_of_or_type! value, example_value.first.class
+              elsif key.to_s == "config"
+                validate_ssh_config!(value)
+              elsif key.to_s == "files" || key.to_s == "directories"
+                validate_paths!(value)
               else
                 validate_array_of! value, example_value.first.class
               end
@@ -129,6 +135,47 @@ class Kamal::Configuration::Validator
       end
     end
 
+    def validate_ssh_config!(config)
+      if config.is_a?(Array)
+        validate_array_of! config, String
+      elsif boolean?(config.class) || config.is_a?(String)
+        # Booleans and Strings are allowed
+      else
+        type_error(TrueClass, FalseClass, String, Array)
+      end
+    end
+
+    def validate_paths!(paths)
+      validate_type! paths, Array
+
+      paths.each_with_index do |path, index|
+        with_context(index) do
+          validate_type! path, String, Hash
+
+          if path.is_a?(Hash)
+            %w[local remote mode owner options].each do |key|
+              with_context(key) do
+                validate_type! path[key], String if path.key?(key)
+              end
+            end
+          end
+        end
+      end
+    end
+
+    def validate_hooks_output!(value)
+      # hooks_output can be either a symbol/string (global) or a hash (per-hook)
+      if value.is_a?(Hash)
+        value.each do |hook, level|
+          with_context(hook) do
+            validate_type! level, String, Symbol
+          end
+        end
+      else
+        validate_type! value, String, Symbol
+      end
+    end
+
     def validate_type!(value, *types)
       type_error(*types) unless types.any? { |type| valid_type?(value, type) }
     end
@@ -138,7 +185,8 @@ class Kamal::Configuration::Validator
     end
 
     def type_error(*expected_types)
-      error "should be #{expected_types.map { |type| type_description(type) }.join(" or ")}"
+      descriptions = expected_types.map { |type| type_description(type) }.uniq
+      error "should be #{descriptions.join(" or ")}"
     end
 
     def unknown_keys_error(unknown_keys)
@@ -184,8 +232,20 @@ class Kamal::Configuration::Validator
     end
 
     def validate_docker_options!(options)
-      if options
-        error "Cannot set restart policy in docker options, unless-stopped is required" if options["restart"]
+      if restart_policy = options&.find { |key, _| key.to_s == "restart" }
+        validate_restart_policy!(restart_policy.last)
+      end
+    end
+
+    def validate_restart_policy!(restart_policy)
+      with_context("options/restart") do
+        unless restart_policy.is_a?(String)
+          error %(should be a string. Use "no" to disable restarts)
+        end
+
+        unless restart_policy.match?(/\A(?:no|always|unless-stopped|on-failure(?::\d+)?)\z/)
+          error "should be no, always, unless-stopped, on-failure, or on-failure:N"
+        end
       end
     end
 end

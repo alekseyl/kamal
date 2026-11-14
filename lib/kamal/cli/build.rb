@@ -1,5 +1,3 @@
-require "uri"
-
 class Kamal::Cli::Build < Kamal::Cli::Base
   class BuildError < StandardError; end
 
@@ -11,15 +9,17 @@ class Kamal::Cli::Build < Kamal::Cli::Base
 
   desc "push", "Build and push app image to registry"
   option :output, type: :string, default: "registry", banner: "export_type", desc: "Exported type for the build result, and may be any exported type supported by 'buildx --output'."
+  option :no_cache, type: :boolean, default: false, desc: "Build without using Docker's build cache"
   def push
     cli = self
 
-    # Ensure pre-connect hooks run before the build, they may needed for a remote builder
+    # Ensure pre-connect hooks run before the build, they may be needed for a remote builder
     # or the pre-build hooks.
     pre_connect_if_required
 
     ensure_docker_installed
-    login_to_registry_locally
+    setup_local_registry      if KAMAL.registry.local?
+    login_to_registry_locally if !KAMAL.registry.local? && KAMAL.builder.login_to_registry_locally?
 
     run_hook "pre-build"
 
@@ -37,29 +37,31 @@ class Kamal::Cli::Build < Kamal::Cli::Base
       say "Building with uncommitted changes:\n #{uncommitted_changes}", :yellow
     end
 
-    with_env(KAMAL.config.builder.secrets) do
-      run_locally do
-        begin
-          execute *KAMAL.builder.inspect_builder
-        rescue SSHKit::Command::Failed => e
-          if e.message =~ /(context not found|no builder|no compatible builder|does not exist)/
-            warn "Missing compatible builder, so creating a new one first"
-            begin
-              cli.remove
-            rescue SSHKit::Command::Failed
-              raise unless e.message =~ /(context not found|no builder|does not exist)/
+    forward_local_registry_port_for_remote_builder do
+      with_env(KAMAL.config.builder.secrets) do
+        run_locally do
+          begin
+            execute *KAMAL.builder.inspect_builder
+          rescue SSHKit::Command::Failed => e
+            if e.message =~ /(context not found|no builder|no compatible builder|does not exist)/
+              warn "Missing compatible builder, so creating a new one first"
+              begin
+                cli.remove
+              rescue SSHKit::Command::Failed
+                raise unless e.message =~ /(context not found|no builder|does not exist)/
+              end
+              cli.create
+            else
+              raise
             end
-            cli.create
-          else
-            raise
           end
-        end
 
-        # Get the command here to ensure the Dir.chdir doesn't interfere with it
-        push = KAMAL.builder.push(cli.options[:output])
+          # Get the command here to ensure the Dir.chdir doesn't interfere with it
+          push = KAMAL.builder.push(cli.options[:output], no_cache: cli.options[:no_cache])
 
-        KAMAL.with_verbosity(:debug) do
-          Dir.chdir(KAMAL.config.builder.build_directory) { execute *push }
+          KAMAL.with_verbosity(:debug) do
+            Dir.chdir(KAMAL.config.builder.build_directory) { execute *push, env: KAMAL.builder.push_env }
+          end
         end
       end
     end
@@ -67,16 +69,18 @@ class Kamal::Cli::Build < Kamal::Cli::Base
 
   desc "pull", "Pull app image from registry onto servers"
   def pull
-    login_to_registry_remotely
+    login_to_registry_remotely unless KAMAL.registry.local?
 
-    if (first_hosts = mirror_hosts).any?
-      #  Pull on a single host per mirror first to seed them
-      say "Pulling image on #{first_hosts.join(", ")} to seed the #{"mirror".pluralize(first_hosts.count)}...", :magenta
-      pull_on_hosts(first_hosts)
-      say "Pulling image on remaining hosts...", :magenta
-      pull_on_hosts(KAMAL.app_hosts - first_hosts)
-    else
-      pull_on_hosts(KAMAL.app_hosts)
+    forward_local_registry_port(KAMAL.hosts, **KAMAL.config.ssh.options) do
+      if (first_hosts = mirror_hosts).any?
+        #  Pull on a single host per mirror first to seed them
+        say "Pulling image on #{first_hosts.join(", ")} to seed the #{"mirror".pluralize(first_hosts.count)}...", :magenta
+        pull_on_hosts(first_hosts)
+        say "Pulling image on remaining hosts...", :magenta
+        pull_on_hosts(KAMAL.app_hosts - first_hosts)
+      else
+        pull_on_hosts(KAMAL.app_hosts)
+      end
     end
   end
 
@@ -119,6 +123,7 @@ class Kamal::Cli::Build < Kamal::Cli::Base
 
   desc "dev", "Build using the working directory, tag it as dirty, and push to local image store."
   option :output, type: :string, default: "docker", banner: "export_type", desc: "Exported type for the build result, and may be any exported type supported by 'buildx --output'."
+  option :no_cache, type: :boolean, default: false, desc: "Build without using Docker's build cache"
   def dev
     cli = self
 
@@ -144,7 +149,7 @@ class Kamal::Cli::Build < Kamal::Cli::Base
 
     with_env(KAMAL.config.builder.secrets) do
       run_locally do
-        build = KAMAL.builder.push(cli.options[:output], tag_as_dirty: true)
+        build = KAMAL.builder.push(cli.options[:output], tag_as_dirty: true, no_cache: cli.options[:no_cache])
         KAMAL.with_verbosity(:debug) do
           execute(*build)
         end
@@ -190,6 +195,12 @@ class Kamal::Cli::Build < Kamal::Cli::Base
       end
     end
 
+    def setup_local_registry
+      run_locally do
+        execute *KAMAL.registry.setup
+      end
+    end
+
     def login_to_registry_locally
       run_locally do
         execute *KAMAL.registry.login
@@ -200,5 +211,32 @@ class Kamal::Cli::Build < Kamal::Cli::Base
       on(KAMAL.app_hosts) do
         execute *KAMAL.registry.login
       end
+    end
+
+    def forward_local_registry_port_for_remote_builder(&block)
+      if KAMAL.builder.remote?
+        remote_uri = URI(KAMAL.config.builder.remote)
+        forward_local_registry_port([ remote_uri.host ], **remote_builder_ssh_options(remote_uri), &block)
+      else
+        yield
+      end
+    end
+
+    def forward_local_registry_port(hosts, **ssh_options, &block)
+      if KAMAL.config.registry.local?
+        say "Setting up local registry port forwarding to #{hosts.join(', ')}..."
+        PortForwarding.new(hosts, KAMAL.config.registry.local_port, **ssh_options).forward(&block)
+      else
+        yield
+      end
+    end
+
+    def remote_builder_ssh_options(remote_uri)
+      { user: remote_uri.user,
+        port: remote_uri.port,
+        keepalive: KAMAL.config.ssh.options[:keepalive],
+        keepalive_interval: KAMAL.config.ssh.options[:keepalive_interval],
+        logger: KAMAL.config.ssh.options[:logger]
+      }.compact
     end
 end
